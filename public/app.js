@@ -281,7 +281,7 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
                     </div>
                     <div class="action-buttons">
                         <button class="btn-action btn-rename" onclick="renameVideo('${video.path.replace(/'/g, "\\'")}', '${video.studentGroup}', '${video.date}')">✏️</button>
-                        <button class="btn-action btn-upload ${activeUploads.has(video.path) ? 'btn-uploading' : ''}" onclick="uploadVideo('${video.path.replace(/'/g, "\\'")}', '${video.studentGroup}', '${video.date}')" style="--upload-progress:${uploadProgress.get(video.path) || 0}%">${activeUploads.has(video.path) ? '' : '☁️'}</button>
+                        <button class="btn-action btn-upload ${activeUploads.has(video.path) ? 'btn-uploading' : ''}" onclick="uploadVideo('${video.path.replace(/'/g, "\\'")}', '${video.studentGroup}', '${video.date}')">${activeUploads.has(video.path) ? '' : '☁️'}</button>
                         <button class="btn-action btn-delete" onclick="deleteVideo('${video.path.replace(/'/g, "\\'")}')">🗑️</button>
                     </div>
                 </div>
@@ -476,7 +476,7 @@ function createRecordingRow(rec, isEvenDate) {
                     </div>
                     <div class="action-buttons">
                         <button class="btn-action btn-rename" onclick="renameVideo('${video.path.replace(/'/g, "\\'")}', '${rec.studentGroup}', '${rec.date}')">✏️</button>
-                        <button class="btn-action btn-upload ${activeUploads.has(video.path) ? 'btn-uploading' : ''}" onclick="uploadVideo('${video.path.replace(/'/g, "\\'")}', '${rec.studentGroup}', '${rec.date}')" style="--upload-progress:${uploadProgress.get(video.path) || 0}%">${activeUploads.has(video.path) ? '' : '☁️'}</button>
+                        <button class="btn-action btn-upload ${activeUploads.has(video.path) ? 'btn-uploading' : ''}" onclick="uploadVideo('${video.path.replace(/'/g, "\\'")}', '${rec.studentGroup}', '${rec.date}')">${activeUploads.has(video.path) ? '' : '☁️'}</button>
                         <button class="btn-action btn-delete" onclick="deleteVideo('${video.path.replace(/'/g, "\\'")}')">🗑️</button>
                     </div>
                 </div>
@@ -570,20 +570,8 @@ async function openInFinder(videoPath) {
     }
 }
 
-// Track active uploads with progress
+// Track active uploads
 const activeUploads = new Map();
-const uploadProgress = new Map();
-
-// Update upload progress display
-function updateUploadProgress(videoPath, progress) {
-    uploadProgress.set(videoPath, progress);
-    const buttons = document.querySelectorAll('.btn-uploading');
-    buttons.forEach(btn => {
-        if (btn.onclick && btn.onclick.toString().includes(videoPath.replace(/'/g, "\\'"))) {
-            btn.style.setProperty('--upload-progress', `${progress}%`);
-        }
-    });
-}
 
 // Upload video to Google Drive
 async function uploadVideo(videoPath, studentGroup, date) {
@@ -615,14 +603,8 @@ async function uploadVideo(videoPath, studentGroup, date) {
     // Re-render to show progress indicator
     renderRecordings();
 
-    // Track upload progress
-    xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-            const percentComplete = (e.loaded / e.total) * 100;
-            console.log(`📤 Upload progress: ${percentComplete.toFixed(1)}% (${(e.loaded / 1024 / 1024).toFixed(1)} MB / ${(e.total / 1024 / 1024).toFixed(1)} MB)`);
-            updateUploadProgress(videoPath, percentComplete);
-        }
-    });
+    // Note: Progress events only track browser→server upload (the JSON request),
+    // not the actual file upload to Google Drive which happens server-side
 
     // Handle completion
     xhr.addEventListener('load', () => {

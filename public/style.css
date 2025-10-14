@@ -365,27 +365,28 @@ tr:hover {
     display: none;
 }
 
-/* Circular progress indicator (macOS style) */
+/* Rotating spinner for upload (honest feedback) */
 .btn-uploading {
     position: relative;
     opacity: 0.95;
     cursor: pointer;
+    pointer-events: none;
 }
 
 .btn-uploading::before {
     content: '';
     position: absolute;
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     top: 50%;
     left: 50%;
-    margin: -9px 0 0 -9px;
+    margin: -8px 0 0 -8px;
     border-radius: 50%;
-    background: conic-gradient(
-        from 0deg,
-        white 0% var(--upload-progress, 0%),
-        rgba(255, 255, 255, 0.25) var(--upload-progress, 0%) 100%
-    );
-    mask: radial-gradient(circle, transparent 6px, black 7px);
-    -webkit-mask: radial-gradient(circle, transparent 6px, black 7px);
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: white;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }
