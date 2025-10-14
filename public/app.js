@@ -584,7 +584,6 @@ async function uploadVideo(videoPath, studentGroup, date) {
         const xhr = activeUploads.get(videoPath);
         xhr.abort();
         activeUploads.delete(videoPath);
-        uploadProgress.delete(videoPath);
         renderRecordings();
         return;
     }
@@ -598,7 +597,6 @@ async function uploadVideo(videoPath, studentGroup, date) {
     // Use XMLHttpRequest for upload progress tracking
     const xhr = new XMLHttpRequest();
     activeUploads.set(videoPath, xhr);
-    uploadProgress.set(videoPath, 0);
 
     // Re-render to show progress indicator
     renderRecordings();
@@ -612,18 +610,15 @@ async function uploadVideo(videoPath, studentGroup, date) {
             const result = JSON.parse(xhr.responseText);
             if (result.success) {
                 activeUploads.delete(videoPath);
-                uploadProgress.delete(videoPath);
                 loadData();
             } else {
                 alert('Failed to upload video: ' + result.error);
                 activeUploads.delete(videoPath);
-                uploadProgress.delete(videoPath);
                 renderRecordings();
             }
         } else {
             alert('Upload failed');
             activeUploads.delete(videoPath);
-            uploadProgress.delete(videoPath);
             renderRecordings();
         }
     });
@@ -632,7 +627,6 @@ async function uploadVideo(videoPath, studentGroup, date) {
     xhr.addEventListener('error', () => {
         alert('Failed to upload video');
         activeUploads.delete(videoPath);
-        uploadProgress.delete(videoPath);
         renderRecordings();
     });
 
@@ -640,7 +634,6 @@ async function uploadVideo(videoPath, studentGroup, date) {
     xhr.addEventListener('abort', () => {
         console.log('Upload cancelled');
         activeUploads.delete(videoPath);
-        uploadProgress.delete(videoPath);
         renderRecordings();
     });
 
