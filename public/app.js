@@ -837,7 +837,18 @@ async function syncWithDrive() {
         if (result.success) {
             loadData(); // Reload data
         } else {
-            alert('Sync failed: ' + result.error);
+            // Check for specific error types and provide helpful guidance
+            if (result.error && result.error.includes('Missing credentials.json')) {
+                alert('Google Cloud Setup Required\n\n' +
+                      'Please complete the Google Cloud Console setup:\n\n' +
+                      '1. Create a Google Cloud project\n' +
+                      '2. Enable Google Drive API\n' +
+                      '3. Create OAuth 2.0 credentials\n' +
+                      '4. Download credentials.json to project root\n\n' +
+                      'See README.md for detailed instructions.');
+            } else {
+                alert('Sync failed: ' + result.error);
+            }
         }
     } catch (error) {
         console.error('Error syncing:', error);

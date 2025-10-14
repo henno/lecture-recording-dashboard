@@ -19,6 +19,17 @@ const FOLDERS = {
  * Load or request authorization to call APIs.
  */
 async function authorize() {
+  if (!existsSync(CREDENTIALS_PATH)) {
+    throw new Error(
+      `Missing credentials.json file.\n\n` +
+      `Please follow the setup instructions in README.md:\n` +
+      `1. Create a Google Cloud project\n` +
+      `2. Enable Google Drive API\n` +
+      `3. Create OAuth 2.0 credentials\n` +
+      `4. Download credentials.json to project root`
+    );
+  }
+
   const credentials = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf-8'));
   const { client_secret, client_id, redirect_uris } = credentials.installed;
   const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
