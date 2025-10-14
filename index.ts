@@ -1034,7 +1034,7 @@ try {
 serve({
   port: PORT,
   fetch: handleRequest,
-  idleTimeout: 255 // Maximum timeout (4.25 minutes) for processing videos
+  idleTimeout: 600 // 10 minute timeout for large video uploads to Google Drive
 });
 
 console.log(`🚀 Lecture Recording Dashboard running at http://localhost:${PORT}`);

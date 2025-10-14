@@ -369,18 +369,19 @@ tr:hover {
 .btn-uploading {
     position: relative;
     opacity: 0.95;
-    cursor: pointer;
+    cursor: wait;
     pointer-events: none;
+    min-width: 32px;  /* Ensure consistent width */
 }
 
 .btn-uploading::before {
     content: '';
     position: absolute;
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     top: 50%;
     left: 50%;
-    margin: -8px 0 0 -8px;
+    transform: translate(-50%, -50%);  /* Better centering */
     border-radius: 50%;
     border: 2px solid rgba(255, 255, 255, 0.3);
     border-top-color: white;

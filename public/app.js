@@ -590,12 +590,15 @@ async function uploadVideo(videoPath, studentGroup, date) {
 
     const filename = videoPath.split('/').pop();
 
-    if (!confirm(`Upload ${filename} to Google Drive?`)) {
+    if (!confirm(`Upload ${filename} to Google Drive?\n\nNote: Large files may take 5-10 minutes to upload.\nThe spinner will keep rotating during the upload.`)) {
         return;
     }
 
+    console.log(`🚀 Starting upload: ${filename}`);
+
     // Use XMLHttpRequest for upload progress tracking
     const xhr = new XMLHttpRequest();
+    xhr.timeout = 600000; // 10 minute timeout for large uploads
     activeUploads.set(videoPath, xhr);
 
     // Re-render to show progress indicator
@@ -609,6 +612,7 @@ async function uploadVideo(videoPath, studentGroup, date) {
         if (xhr.status === 200) {
             const result = JSON.parse(xhr.responseText);
             if (result.success) {
+                console.log(`✅ Upload complete: ${filename}`);
                 activeUploads.delete(videoPath);
                 loadData();
             } else {
@@ -661,7 +665,15 @@ async function uploadVideo(videoPath, studentGroup, date) {
 
     // Handle abort
     xhr.addEventListener('abort', () => {
-        console.log('Upload cancelled');
+        console.log('❌ Upload cancelled');
+        activeUploads.delete(videoPath);
+        renderRecordings();
+    });
+
+    // Handle timeout
+    xhr.addEventListener('timeout', () => {
+        console.error('⏱️ Upload timeout after 10 minutes');
+        alert('Upload timeout - file may be too large or connection too slow.\n\nTry uploading manually to Google Drive.');
         activeUploads.delete(videoPath);
         renderRecordings();
     });
