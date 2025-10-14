@@ -143,6 +143,17 @@ Click the trash icon (🗑️) to delete a video or empty folder.
 - Ensure `credentials.json` exists in project root
 - Run authorization flow via dashboard
 
+**Lost or deleted credentials.json file**
+- Google doesn't allow re-downloading OAuth credentials for security reasons
+- To regenerate:
+  1. Go to [Google Cloud Console](https://console.cloud.google.com/) > "APIs & Services" > "Credentials"
+  2. Click on your existing OAuth 2.0 Client ID
+  3. Click "Add Secret" to generate a new client secret
+  4. Download the new JSON file
+  5. Save it as `credentials.json` in the project root
+  6. In Google Console, disable the old secret, then delete it
+  7. Re-authorize the app at `http://localhost:3000` (this will create a new `token.json`)
+
 **Upload shows 100% immediately**
 - This is expected - the spinner shows upload is in progress
 - Actual upload happens server-side and may take several minutes
