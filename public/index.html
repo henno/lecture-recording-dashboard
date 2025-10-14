@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lecture Recording Dashboard</title>
+    <link rel="stylesheet" href="/public/style.css">
+</head>
+<body>
+    <header>
+        <h1>📹 Lecture Recording Dashboard</h1>
+        <div class="controls">
+            <button id="authBtn" class="btn" style="display:none;background:#ff9500;color:white;border-color:#ff9500;">🔐 Authorize Google Drive</button>
+            <button id="syncBtn" class="btn btn-primary">🔄 Sync with Google Drive</button>
+            <button id="refreshBtn" class="btn">↻ Refresh</button>
+        </div>
+    </header>
+
+    <div class="filters">
+        <label>
+            <input type="checkbox" id="filter-missing" checked> Show Missing
+        </label>
+        <label>
+            <input type="checkbox" id="filter-not-uploaded" checked> Show Not Uploaded
+        </label>
+        <label>
+            <input type="checkbox" id="filter-uploaded" checked> Show Uploaded
+        </label>
+        <label>
+            Group:
+            <select id="filter-group">
+                <option value="">All</option>
+                <option value="IS24">IS24</option>
+                <option value="TAK24">TAK24</option>
+                <option value="TAK25">TAK25</option>
+            </select>
+        </label>
+    </div>
+
+    <div class="summary">
+        <div class="summary-card missing">
+            <div class="summary-count" id="count-missing">0</div>
+            <div class="summary-label">Missing</div>
+        </div>
+        <div class="summary-card not-uploaded">
+            <div class="summary-count" id="count-not-uploaded">0</div>
+            <div class="summary-label">Not Uploaded</div>
+        </div>
+        <div class="summary-card uploaded">
+            <div class="summary-count" id="count-uploaded">0</div>
+            <div class="summary-label">Uploaded</div>
+        </div>
+    </div>
+
+    <div id="loading" class="loading">Loading...</div>
+    <div class="recordings">
+        <table id="recordings">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Local Videos</th>
+                    <th>Group</th>
+                    <th>Time</th>
+                    <th style="display:none;">Status</th>
+                    <th>GDrive Videos</th>
+                </tr>
+            </thead>
+            <tbody id="recordingsBody">
+            </tbody>
+        </table>
+    </div>
+
+    <script src="/public/app.js"></script>
+</body>
+</html>

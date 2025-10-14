@@ -1,0 +1,25 @@
+# Credentials and tokens
+credentials.json
+token.json
+client_secret_*.json
+
+# Cache files
+timestamp-cache.json
+timebolted-cache.json
+status-cache.json
+
+# Debug files
+debug_frames/
+temp/
+
+# Node modules and dependencies
+node_modules/
+bun.lockb
+
+# Data files (contain local paths)
+lecture_recordings.json
+drive-files.json
+
+# System files
+.DS_Store
+*.log
