@@ -612,12 +612,41 @@ async function uploadVideo(videoPath, studentGroup, date) {
                 activeUploads.delete(videoPath);
                 loadData();
             } else {
-                alert('Failed to upload video: ' + result.error);
+                // Check for specific error types and provide helpful guidance
+                if (result.error && result.error.includes('Google Drive not configured')) {
+                    alert('Google Drive Authorization Required\n\nPlease authorize Google Drive first by clicking the "🔑 Authorize Google Drive" button at the top of the page.\n\nAfter authorization, you can upload videos.');
+                    // Highlight the auth button if it exists
+                    const authBtn = document.getElementById('authBtn');
+                    if (authBtn && authBtn.style.display !== 'none') {
+                        authBtn.style.animation = 'pulse 1s ease-in-out 3';
+                    }
+                } else {
+                    alert('Failed to upload video: ' + result.error);
+                }
                 activeUploads.delete(videoPath);
                 renderRecordings();
             }
+        } else if (xhr.status === 400) {
+            // Parse error for 400 responses
+            try {
+                const result = JSON.parse(xhr.responseText);
+                if (result.error && result.error.includes('Google Drive not configured')) {
+                    alert('Google Drive Authorization Required\n\nPlease authorize Google Drive first by clicking the "🔑 Authorize Google Drive" button at the top of the page.\n\nAfter authorization, you can upload videos.');
+                    // Highlight the auth button if it exists
+                    const authBtn = document.getElementById('authBtn');
+                    if (authBtn && authBtn.style.display !== 'none') {
+                        authBtn.style.animation = 'pulse 1s ease-in-out 3';
+                    }
+                } else {
+                    alert('Upload failed: ' + result.error);
+                }
+            } catch (e) {
+                alert('Upload failed (Error 400)');
+            }
+            activeUploads.delete(videoPath);
+            renderRecordings();
         } else {
-            alert('Upload failed');
+            alert('Upload failed (Error ' + xhr.status + ')');
             activeUploads.delete(videoPath);
             renderRecordings();
         }
