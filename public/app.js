@@ -60,9 +60,9 @@ function renderRecordings() {
         if (isMissing && !filters.missing) return false;
         if (isNotUploaded && !filters.notUploaded) return false;
         if (isUploaded && !filters.uploaded) return false;
-        if (filters.group && rec.studentGroup !== filters.group) return false;
+        return !(filters.group && rec.studentGroup !== filters.group);
 
-        return true;
+
     });
 
     // Sort: purely chronological by date
@@ -111,8 +111,7 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     const isMissing = !hasUploadedVideo && !hasLocalFolder;
     const isUploaded = allUploaded;
 
-    let statusClass = isMissing ? 'missing' : (isUploaded ? 'uploaded' : 'not-uploaded');
-    tr.className = statusClass;
+    tr.className = isMissing ? 'missing' : (isUploaded ? 'uploaded' : 'not-uploaded');
 
     // Time range - find a recording with valid times (some recordings might not have times)
     let timeRange = '-';
@@ -123,7 +122,7 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     }
 
     // Status badge
-    let statusBadge = '';
+    let statusBadge
     if (isMissing) {
         statusBadge = '<span class="badge missing">⚠️ MISSING</span>';
     } else if (isUploaded) {
@@ -253,11 +252,8 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     } else if (localVideos.length > 0) {
         localVideosHTML = '<div class="video-list">';
         localVideos.forEach(video => {
-            const timeboltBadge = video.isTimebolted ?
-                '<span class="badge timebolted">🎬 Timebolted</span>' : '';
-
-            let leftAddon = '';
-            if (video.recordingTime) {
+          let leftAddon = '';
+          if (video.recordingTime) {
                 leftAddon = video.recordingTime;
                 if (video.duration) {
                     leftAddon += ` (${video.duration})`;
@@ -281,7 +277,7 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
                     </div>
                     <div class="action-buttons">
                         <button class="btn-action btn-rename" onclick="renameVideo('${video.path.replace(/'/g, "\\'")}', '${video.studentGroup}', '${video.date}')">✏️</button>
-                        <button class="btn-action btn-upload ${activeUploads.has(video.path) ? 'btn-uploading' : ''}" onclick="uploadVideo('${video.path.replace(/'/g, "\\'")}', '${video.studentGroup}', '${video.date}')">${activeUploads.has(video.path) ? '' : '☁️'}</button>
+                        ${getUploadButtonHTML(video.path, video.studentGroup, video.date)}
                         <button class="btn-action btn-delete" onclick="deleteVideo('${video.path.replace(/'/g, "\\'")}')">🗑️</button>
                     </div>
                 </div>
@@ -337,179 +333,6 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     return tr;
 }
 
-// Create recording row
-function createRecordingRow(rec, isEvenDate) {
-    const tr = document.createElement('tr');
-    const isMissing = rec.folder === 'MISSING!';
-    const isUploaded = rec.uploaded === true;
-
-    let statusClass = isMissing ? 'missing' : (isUploaded ? 'uploaded' : 'not-uploaded');
-    tr.className = statusClass;
-
-    // Status badge
-    let statusBadge = '';
-    if (isMissing) {
-        statusBadge = '<span class="badge missing">⚠️ MISSING</span>';
-    } else if (isUploaded) {
-        // Look up Drive URL and filename using "group:date" key
-        const driveKey = `${rec.studentGroup}:${rec.date}`;
-        const driveFile = driveFiles[driveKey];
-
-        // Check if any local video file size matches the Drive file size (within 1% tolerance)
-        let hasMatchingLocalSize = false;
-        if (driveFile?.size && rec.videosWithStatus && rec.videosWithStatus.length > 0) {
-            hasMatchingLocalSize = rec.videosWithStatus.some(video => {
-                if (!video.fileSizeBytes) return false;
-                const diff = Math.abs(driveFile.size - video.fileSizeBytes);
-                const tolerance = driveFile.size * 0.01; // 1% tolerance
-                return diff <= tolerance;
-            });
-        }
-
-        // Simple status badge - just "UPLOADED"
-        statusBadge = '<span class="badge uploaded">☁️ UPLOADED</span>';
-
-        // Store matching info for later use in video rendering
-        rec._hasMatchingLocalSize = hasMatchingLocalSize;
-        rec._driveFileSize = driveFile?.size;
-    } else {
-        statusBadge = '<span class="badge" style="background:#ff9500;color:white;">📁 Local</span>';
-    }
-
-    // GDrive Videos section
-    let gdriveVideosHTML = '';
-    if (isMissing) {
-        gdriveVideosHTML = '-';
-    } else if (isUploaded) {
-        const driveKey = `${rec.studentGroup}:${rec.date}`;
-        const driveFile = driveFiles[driveKey];
-        const driveUrl = driveFile?.url || '';
-        const uploadedFilename = driveFile?.name || '';
-
-        // Format file size for Drive file with yellow highlight if matching
-        let uploadedFileSize = '';
-        if (driveFile?.size) {
-            const sizeInGB = driveFile.size / (1024 * 1024 * 1024);
-            const sizeText = sizeInGB >= 1
-                ? `${Math.round(sizeInGB)} GB`
-                : `${Math.round(driveFile.size / (1024 * 1024))} MB`;
-            uploadedFileSize = rec._hasMatchingLocalSize ?
-                `<span class="badge" style="background:yellow;color:black;font-size:0.7rem;font-weight:bold;">💾 ${sizeText}</span>` :
-                `<span class="badge" style="background:#999;color:white;font-size:0.7rem;">💾 ${sizeText}</span>`;
-        }
-
-        if (uploadedFilename && driveUrl) {
-            // Format file size text without badge
-            let fileSizeText = '';
-            if (driveFile?.size) {
-                const sizeInGB = driveFile.size / (1024 * 1024 * 1024);
-                fileSizeText = sizeInGB >= 1
-                    ? `${Math.round(sizeInGB)} GB`
-                    : `${Math.round(driveFile.size / (1024 * 1024))} MB`;
-            }
-
-            const highlightStyle = rec._hasMatchingLocalSize ? 'background:yellow;color:black;font-weight:bold;' : '';
-
-            gdriveVideosHTML = `
-                <div class="video-item">
-                    <div class="input-group">
-                        <input type="text" readonly class="form-control" value="☁️ ${uploadedFilename}" onclick="window.open('${driveUrl.replace(/'/g, "\\'")}', '_blank')" title="Click to open in Google Drive">
-                        <span class="input-group-text" style="${highlightStyle}">${fileSizeText}</span>
-                    </div>
-                </div>
-            `;
-        } else {
-            gdriveVideosHTML = '<em style="color:#999;">Uploaded (no details)</em>';
-        }
-    } else {
-        gdriveVideosHTML = '-';
-    }
-
-    // Local Videos section
-    let localVideosHTML = '';
-    if (isMissing) {
-        localVideosHTML = '<em style="color:#999;">No recording found</em>';
-    } else if (rec.videosWithStatus && rec.videosWithStatus.length > 0) {
-        localVideosHTML = '<div class="video-list">';
-        rec.videosWithStatus.forEach(video => {
-            // Debug logging
-            if (video.isTimebolted) {
-                console.log('Timebolted video detected:', video.filename, video);
-            }
-
-            const timeboltBadge = video.isTimebolted ?
-                '<span class="badge timebolted">🎬 Timebolted</span>' : '';
-
-            // Recording time with duration for left addon
-            let leftAddon = '';
-            if (video.recordingTime) {
-                leftAddon = video.recordingTime;
-                if (video.duration) {
-                    leftAddon += ` (${video.duration})`;
-                }
-            }
-
-            // File size for right addon - highlight in yellow if matches Drive
-            let fileSizeText = video.fileSize || '';
-            let isMatchingSize = false;
-            if (rec._hasMatchingLocalSize && rec._driveFileSize && video.fileSizeBytes) {
-                const diff = Math.abs(rec._driveFileSize - video.fileSizeBytes);
-                const tolerance = rec._driveFileSize * 0.01; // 1% tolerance
-                isMatchingSize = diff <= tolerance;
-            }
-            const highlightStyle = isMatchingSize ? 'background:yellow;color:black;font-weight:bold;' : '';
-
-            // Extract folder name from path
-            const pathParts = video.path.split('/');
-            const folderName = pathParts[pathParts.length - 2] || '';
-            const tooltip = `${folderName}\n${video.filename}\nRecording Time: ${video.recordingTime || 'Unknown'}\nFile Size: ${video.fileSize || 'Unknown'}\nTimebolted: ${video.isTimebolted ? 'Yes' : 'No'}\nMethod: ${video.detectionMethod || 'unknown'}`;
-
-            // Build filename with timebolt badge
-            const filenameWithBadge = video.isTimebolted ? `🎬 ${video.filename}` : `📁 ${video.filename}`;
-
-            localVideosHTML += `
-                <div class="video-item">
-                    <div class="input-group">
-                        ${leftAddon ? `<span class="input-group-text">🕐 ${leftAddon}</span>` : ''}
-                        <input type="text" readonly class="form-control" value="${filenameWithBadge}" onclick="openInFinder('${video.path.replace(/'/g, "\\'")}')" title="${tooltip}">
-                        <span class="input-group-text" style="${highlightStyle}">${fileSizeText}</span>
-                    </div>
-                    <div class="action-buttons">
-                        <button class="btn-action btn-rename" onclick="renameVideo('${video.path.replace(/'/g, "\\'")}', '${rec.studentGroup}', '${rec.date}')">✏️</button>
-                        <button class="btn-action btn-upload ${activeUploads.has(video.path) ? 'btn-uploading' : ''}" onclick="uploadVideo('${video.path.replace(/'/g, "\\'")}', '${rec.studentGroup}', '${rec.date}')">${activeUploads.has(video.path) ? '' : '☁️'}</button>
-                        <button class="btn-action btn-delete" onclick="deleteVideo('${video.path.replace(/'/g, "\\'")}')">🗑️</button>
-                    </div>
-                </div>
-            `;
-        });
-        localVideosHTML += '</div>';
-    } else {
-        const folderPath = `/Users/henno/Documents/Zoom/${rec.folder}`;
-        localVideosHTML = `
-            <div style="display:flex;align-items:center;gap:0.3rem;">
-                <em style="color:#0071e3;cursor:pointer;flex:1;" title="${rec.folder}" onclick="openInFinder('${folderPath.replace(/'/g, "\\'")}')">📁 No videos (${rec.folder})</em>
-                <button class="btn-action btn-delete" onclick="deleteFolder('${folderPath.replace(/'/g, "\\'")}')">🗑️</button>
-            </div>
-        `;
-    }
-
-    // Time range
-    const timeRange = rec.lessonStart && rec.lessonEnd
-        ? (rec.lessonTimeRange || `${rec.lessonStart} - ${rec.lessonEnd}`)
-        : '-';
-
-    tr.innerHTML = `
-        <td style="white-space:nowrap;">${rec.date}</td>
-        <td style="white-space:nowrap;font-size:0.75rem;">${timeRange}</td>
-        <td><span class="badge group">${rec.studentGroup}</span></td>
-        <td>${statusBadge}</td>
-        <td style="max-width:300px;">${gdriveVideosHTML}</td>
-        <td style="max-width:600px;">${localVideosHTML}</td>
-    `;
-
-    return tr;
-}
-
 // Update summary counts
 function updateSummary() {
     // Group by date (same as display logic)
@@ -532,11 +355,10 @@ function updateSummary() {
         const hasLocalFolder = dateRecordings.some(r => r.folder !== 'MISSING!');
         const allUploaded = dateRecordings.every(r => r.uploaded === true);
         const isMissing = !hasUploadedVideo && !hasLocalFolder;
-        const isUploaded = allUploaded;
 
         if (isMissing) {
             missing++;
-        } else if (isUploaded) {
+        } else if (allUploaded) {
             uploaded++;
         } else {
             notUploaded++;
@@ -570,8 +392,55 @@ async function openInFinder(videoPath) {
     }
 }
 
-// Track active uploads
+// Track active uploads - Map of videoPath -> { xhr, eventSource, progress: { percent, bytesUploaded, bytesTotal, status } }
 const activeUploads = new Map();
+
+// Generate upload button HTML based on upload state
+function getUploadButtonHTML(videoPath, studentGroup, date) {
+    const uploadState = activeUploads.get(videoPath);
+
+    if (!uploadState) {
+        // Not uploading - show cloud icon
+        return `<button class="btn-action btn-upload" data-video-path="${videoPath.replace(/'/g, '&apos;')}" onclick="uploadVideo('${videoPath.replace(/'/g, "\\'")}', '${studentGroup}', '${date}')">☁️</button>`;
+    }
+
+    // Uploading - show progress percentage
+    const percent = uploadState.progress.percent || 0;
+    const isComplete = uploadState.progress.status === 'complete';
+
+    if (isComplete) {
+        return `<button class="btn-action btn-upload" data-video-path="${videoPath.replace(/'/g, '&apos;')}" style="background: linear-gradient(180deg, #34c759 0%, #28a745 100%); color: white;">✓</button>`;
+    }
+
+    // Show percentage with orange background
+    return `<button class="btn-action btn-upload btn-uploading" data-video-path="${videoPath.replace(/'/g, '&apos;')}" onclick="uploadVideo('${videoPath.replace(/'/g, "\\'")}', '${studentGroup}', '${date}')" style="background: linear-gradient(180deg, #ff9500 0%, #ff8000 100%); font-size: 0.7rem; font-weight: 600; color: white; text-shadow: 0 0 3px rgba(0,0,0,0.5);">${percent}%</button>`;
+}
+
+// Directly update upload button without re-rendering entire table
+function updateUploadButton(videoPath, progress) {
+    // Find all upload buttons for this video path (there might be duplicates in the table)
+    const buttons = document.querySelectorAll(`.btn-upload[data-video-path="${videoPath.replace(/"/g, '&quot;')}"]`);
+
+    buttons.forEach(button => {
+        const percent = progress.percent || 0;
+        const isComplete = progress.status === 'complete';
+
+        if (isComplete) {
+            button.textContent = '✓';
+            button.className = 'btn-action btn-upload';
+            button.style.background = 'linear-gradient(180deg, #34c759 0%, #28a745 100%)';
+            button.style.color = 'white';
+        } else {
+            button.textContent = `${percent}%`;
+            button.className = 'btn-action btn-upload btn-uploading';
+            button.style.background = 'linear-gradient(180deg, #ff9500 0%, #ff8000 100%)';
+            button.style.fontSize = '0.7rem';
+            button.style.fontWeight = '600';
+            button.style.color = 'white';
+            button.style.textShadow = '0 0 3px rgba(0,0,0,0.5)';
+        }
+    });
+}
 
 // Upload video to Google Drive
 async function uploadVideo(videoPath, studentGroup, date) {
@@ -581,8 +450,11 @@ async function uploadVideo(videoPath, studentGroup, date) {
         if (!confirm('Cancel upload?')) {
             return;
         }
-        const xhr = activeUploads.get(videoPath);
-        xhr.abort();
+        const uploadState = activeUploads.get(videoPath);
+        uploadState.xhr.abort();
+        if (uploadState.eventSource) {
+            uploadState.eventSource.close();
+        }
         activeUploads.delete(videoPath);
         renderRecordings();
         return;
@@ -590,22 +462,57 @@ async function uploadVideo(videoPath, studentGroup, date) {
 
     const filename = videoPath.split('/').pop();
 
-    if (!confirm(`Upload ${filename} to Google Drive?\n\nNote: Large files may take 5-10 minutes to upload.\nThe spinner will keep rotating during the upload.`)) {
+    if (!confirm(`Upload ${filename} to Google Drive?\n\nNote: Large files may take 5-10 minutes to upload.\nYou'll see real-time progress percentage.`)) {
         return;
     }
 
     console.log(`🚀 Starting upload: ${filename}`);
 
-    // Use XMLHttpRequest for upload progress tracking
+    // Generate unique upload ID for progress tracking
+    const uploadId = `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Use XMLHttpRequest for upload
     const xhr = new XMLHttpRequest();
     xhr.timeout = 600000; // 10 minute timeout for large uploads
-    activeUploads.set(videoPath, xhr);
+
+    // Create upload state object
+    const uploadState = {
+        xhr: xhr,
+        eventSource: null,
+        progress: {
+            percent: 0,
+            bytesUploaded: 0,
+            bytesTotal: 0,
+            status: 'uploading'
+        }
+    };
+    activeUploads.set(videoPath, uploadState);
+
+    // Connect to SSE endpoint for real-time progress
+    const eventSource = new EventSource(`/api/upload-progress/${uploadId}`);
+    uploadState.eventSource = eventSource;
+
+    eventSource.onmessage = (event) => {
+        try {
+            const progress = JSON.parse(event.data);
+            uploadState.progress = progress;
+
+            // Directly update the button without re-rendering the entire table
+            updateUploadButton(videoPath, progress);
+
+            console.log(`📊 Upload progress: ${progress.percent}% (${Math.round(progress.bytesUploaded / (1024 * 1024))} MB / ${Math.round(progress.bytesTotal / (1024 * 1024))} MB)`);
+        } catch (e) {
+            console.error('Error parsing progress data:', e);
+        }
+    };
+
+    eventSource.onerror = (error) => {
+        console.error('SSE connection error:', error);
+        // Don't close or delete - upload might still be in progress
+    };
 
     // Re-render to show progress indicator
     renderRecordings();
-
-    // Note: Progress events only track browser→server upload (the JSON request),
-    // not the actual file upload to Google Drive which happens server-side
 
     // Handle completion
     xhr.addEventListener('load', () => {
@@ -613,6 +520,9 @@ async function uploadVideo(videoPath, studentGroup, date) {
             const result = JSON.parse(xhr.responseText);
             if (result.success) {
                 console.log(`✅ Upload complete: ${filename}`);
+                if (uploadState.eventSource) {
+                    uploadState.eventSource.close();
+                }
                 activeUploads.delete(videoPath);
                 loadData();
             } else {
@@ -626,6 +536,9 @@ async function uploadVideo(videoPath, studentGroup, date) {
                     }
                 } else {
                     alert('Failed to upload video: ' + result.error);
+                }
+                if (uploadState.eventSource) {
+                    uploadState.eventSource.close();
                 }
                 activeUploads.delete(videoPath);
                 renderRecordings();
@@ -647,10 +560,16 @@ async function uploadVideo(videoPath, studentGroup, date) {
             } catch (e) {
                 alert('Upload failed (Error 400)');
             }
+            if (uploadState.eventSource) {
+                uploadState.eventSource.close();
+            }
             activeUploads.delete(videoPath);
             renderRecordings();
         } else {
             alert('Upload failed (Error ' + xhr.status + ')');
+            if (uploadState.eventSource) {
+                uploadState.eventSource.close();
+            }
             activeUploads.delete(videoPath);
             renderRecordings();
         }
@@ -659,6 +578,9 @@ async function uploadVideo(videoPath, studentGroup, date) {
     // Handle errors
     xhr.addEventListener('error', () => {
         alert('Failed to upload video');
+        if (uploadState.eventSource) {
+            uploadState.eventSource.close();
+        }
         activeUploads.delete(videoPath);
         renderRecordings();
     });
@@ -666,6 +588,9 @@ async function uploadVideo(videoPath, studentGroup, date) {
     // Handle abort
     xhr.addEventListener('abort', () => {
         console.log('❌ Upload cancelled');
+        if (uploadState.eventSource) {
+            uploadState.eventSource.close();
+        }
         activeUploads.delete(videoPath);
         renderRecordings();
     });
@@ -674,17 +599,21 @@ async function uploadVideo(videoPath, studentGroup, date) {
     xhr.addEventListener('timeout', () => {
         console.error('⏱️ Upload timeout after 10 minutes');
         alert('Upload timeout - file may be too large or connection too slow.\n\nTry uploading manually to Google Drive.');
+        if (uploadState.eventSource) {
+            uploadState.eventSource.close();
+        }
         activeUploads.delete(videoPath);
         renderRecordings();
     });
 
-    // Send request
+    // Send request with uploadId
     xhr.open('POST', '/api/upload');
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.send(JSON.stringify({
         videoPath: videoPath,
         studentGroup: studentGroup,
-        date: date
+        date: date,
+        uploadId: uploadId
     }));
 }
 

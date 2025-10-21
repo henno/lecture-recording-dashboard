@@ -10,6 +10,19 @@ const execAsync = promisify(exec);
 
 const PORT = 3000;
 
+// Upload progress tracking
+interface UploadProgress {
+  uploadId: string;
+  filename: string;
+  bytesUploaded: number;
+  bytesTotal: number;
+  percent: number;
+  status: 'uploading' | 'complete' | 'error';
+}
+
+const uploadProgress = new Map<string, UploadProgress>();
+const progressListeners = new Map<string, Set<(data: string) => void>>();
+
 // Load data files
 function loadJSON(filename: string) {
   try {
@@ -49,15 +62,18 @@ function saveTimestampCache(cache: any) {
   Bun.write('timestamp-cache.json', JSON.stringify(cache, null, 2));
 }
 
-// Get partial MD5 hash of file (first 300 bytes only for speed)
-async function getFileMD5(filePath: string): Promise<string | null> {
+// Get partial hash of file (first 300 bytes only for speed)
+async function getFileHash(filePath: string): Promise<string | null> {
   try {
-    // Read first 300 bytes and compute MD5 (extremely fast)
+    // Read first 300 bytes and compute xxHash3 (extremely fast)
     // Analysis showed max common prefix between different files is 163 bytes, so 300 bytes provides 84% safety margin
-    const { stdout } = await execAsync(`head -c 300 "${filePath}" | md5`);
-    return stdout.trim();
+    const file = Bun.file(filePath);
+    const slice = file.slice(0, 300);
+    const buffer = await slice.arrayBuffer();
+    const hash = Bun.hash.xxHash3(buffer);
+    return hash.toString();
   } catch (error) {
-    console.error('MD5 hash error:', error);
+    console.error('Hash error:', error);
     return null;
   }
 }
@@ -149,8 +165,8 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
     return cachedResult.timestamp ? { timestamp: cachedResult.timestamp, duration: cachedResult.duration || '' } : null;
   }
 
-  // If cache miss or file changed, compute MD5 for validation
-  const fileMD5 = await getFileMD5(videoPath);
+  // If cache miss or file changed, compute hash for validation
+  const fileHash = await getFileHash(videoPath);
 
   try {
     const filename = videoPath.split('/').pop() || '';
@@ -320,12 +336,12 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
     }
 
     // Cache the result (even if null, to avoid reprocessing)
-    if (fileMD5 && fileMtime) {
+    if (fileHash && fileMtime) {
       cache.results[videoPath] = {
         timestamp,
         duration: durationStr,
         extractedAt: new Date().toISOString(),
-        md5: fileMD5,
+        hash: fileHash,
         mtime: fileMtime
       };
       saveTimestampCache(cache);
@@ -371,20 +387,20 @@ async function analyzeVideo(videoPath: string) {
     };
   }
 
-  // If cache miss or file changed, compute MD5 for validation
-  const fileMD5 = await getFileMD5(videoPath);
+  // If cache miss or file changed, compute hash for validation
+  const fileHash = await getFileHash(videoPath);
 
   // Perform silence analysis
   console.log(`Analyzing video for timebolt: ${filename}`);
   const isTimeboltedBySilence = await detectTimeboltBySilence(videoPath);
 
-  // Update cache with MD5 hash and mtime
-  if (fileMD5 && fileMtime) {
+  // Update cache with hash and mtime
+  if (fileHash && fileMtime) {
     cache.results[videoPath] = {
       isTimebolted: isTimeboltedBySilence,
       analyzedAt: new Date().toISOString(),
       method: 'silence-analysis',
-      md5: fileMD5,
+      hash: fileHash,
       mtime: fileMtime
     };
     cache.lastRun = new Date().toISOString();
@@ -395,6 +411,18 @@ async function analyzeVideo(videoPath: string) {
     isTimebolted: isTimeboltedBySilence,
     detectionMethod: 'silence-analysis'
   };
+}
+
+// Emit progress update to all listeners
+function emitProgress(uploadId: string) {
+  const progress = uploadProgress.get(uploadId);
+  if (!progress) return;
+
+  const listeners = progressListeners.get(uploadId);
+  if (!listeners || listeners.size === 0) return;
+
+  const data = JSON.stringify(progress);
+  listeners.forEach(send => send(data));
 }
 
 // API Routes
@@ -412,6 +440,53 @@ async function handleRequest(req: Request): Promise<Response> {
 
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers });
+  }
+
+  // SSE: Upload progress stream
+  if (path.startsWith('/api/upload-progress/')) {
+    const uploadId = path.replace('/api/upload-progress/', '');
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+
+        // Function to send SSE message
+        const send = (data: string) => {
+          controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+        };
+
+        // Register listener
+        if (!progressListeners.has(uploadId)) {
+          progressListeners.set(uploadId, new Set());
+        }
+        progressListeners.get(uploadId)!.add(send);
+
+        // Send initial state if exists
+        const progress = uploadProgress.get(uploadId);
+        if (progress) {
+          send(JSON.stringify(progress));
+        }
+
+        // Cleanup on close
+        req.signal?.addEventListener('abort', () => {
+          const listeners = progressListeners.get(uploadId);
+          if (listeners) {
+            listeners.delete(send);
+            if (listeners.size === 0) {
+              progressListeners.delete(uploadId);
+            }
+          }
+        });
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      }
+    });
   }
 
   // Serve static files
@@ -472,12 +547,20 @@ async function handleRequest(req: Request): Promise<Response> {
     }
 
     const loadStartTime = Date.now();
+    console.log('📂 Loading JSON files...');
     const recordings = loadJSON('lecture_recordings.json') || [];
+    console.log(`   - lecture_recordings.json: ${Date.now() - loadStartTime}ms`);
+    const timesLoadStart = Date.now();
     const timesSimplified = loadJSON('times_simplified.json') || [];
+    console.log(`   - times_simplified.json: ${Date.now() - timesLoadStart}ms`);
+    const driveLoadStart = Date.now();
     const driveFiles = loadJSON('drive-files.json') || {};
-    console.log(`⏱️  Loaded JSON files: ${Date.now() - loadStartTime}ms`);
+    console.log(`   - drive-files.json: ${Date.now() - driveLoadStart}ms`);
+    console.log(`⏱️  Total JSON load time: ${Date.now() - loadStartTime}ms`);
 
     // Create a map of date:group -> array of times for quick lookup
+    const mapStartTime = Date.now();
+    console.log('🗺️  Building times map...');
     const timesMap = new Map();
     timesSimplified.forEach((time: any) => {
       const key = `${time.date}:${time.studentGroup}`;
@@ -486,14 +569,21 @@ async function handleRequest(req: Request): Promise<Response> {
       }
       timesMap.get(key).push({ start: time.start, end: time.end });
     });
+    console.log(`⏱️  Times map built: ${Date.now() - mapStartTime}ms`);
 
     // Count total videos to process
     const totalVideos = recordings.reduce((sum: number, rec: any) =>
       sum + (rec.videos ? rec.videos.length : 0), 0);
     console.log(`📹 Processing ${totalVideos} videos across ${recordings.length} recordings`);
 
+    // Load previous video metadata cache for MD5 comparison
+    const previousStatusCache = loadJSON('status-cache.json');
+    const videoMetadataCache = previousStatusCache?.videoMetadataCache || {};
+
     // Process ALL videos across ALL recordings in parallel
     const processingStartTime = Date.now();
+    const newVideoMetadataCache: any = {};
+
     await Promise.all(
       recordings.map(async (recording: any) => {
         // Add lesson time range(s) - may be multiple for same group on same day
@@ -513,19 +603,53 @@ async function handleRequest(req: Request): Promise<Response> {
           recording.videosWithStatus = await Promise.all(
             recording.videos.map(async (videoPath: string) => {
               const videoStartTime = Date.now();
+
+              // Compute xxHash3 of first 300 bytes for cache validation
+              const hashStart = Date.now();
+              const fileHash = await getFileHash(videoPath);
+              const hashTime = Date.now() - hashStart;
+
+              // Check if we have cached metadata for this video with matching hash
+              const cachedMetadata = videoMetadataCache[videoPath];
+              if (cachedMetadata && fileHash && cachedMetadata.hash === fileHash) {
+                // Hash matches - use cached metadata (skip expensive operations)
+                newVideoMetadataCache[videoPath] = cachedMetadata;
+
+                const videoTime = Date.now() - videoStartTime;
+                if (videoTime > 10) {
+                  console.log(`✅ Using cached metadata (${videoTime}ms): ${videoPath.split('/').pop()}`);
+                }
+
+                return cachedMetadata.data;
+              }
+
+              // Hash doesn't match or no cache - need to reprocess
+              console.log(`🔄 Processing video (hash changed): ${videoPath.split('/').pop()}`);
+
+              const analysisStart = Date.now();
               const analysis = await analyzeVideo(videoPath);
+              const analysisTime = Date.now() - analysisStart;
+
+              const timestampStart = Date.now();
               const timestampData = await extractTimestampFromVideo(videoPath);
+              const timestampTime = Date.now() - timestampStart;
+
+              const fileSizeStart = Date.now();
+              const fileSizeBytes = getFileSize(videoPath);
+              const fileSize = fileSizeBytes ? formatFileSize(fileSizeBytes) : '';
+              const fileSizeTime = Date.now() - fileSizeStart;
+
               const videoTime = Date.now() - videoStartTime;
 
               if (videoTime > 1000) {
                 console.log(`⚠️  Slow video (${videoTime}ms): ${videoPath.split('/').pop()}`);
+                console.log(`      - xxHash3: ${hashTime}ms`);
+                console.log(`      - analyzeVideo: ${analysisTime}ms`);
+                console.log(`      - extractTimestamp: ${timestampTime}ms`);
+                console.log(`      - getFileSize: ${fileSizeTime}ms`);
               }
 
-              // Get file size
-              const fileSizeBytes = getFileSize(videoPath);
-              const fileSize = fileSizeBytes ? formatFileSize(fileSizeBytes) : '';
-
-              return {
+              const videoData = {
                 path: videoPath,
                 filename: videoPath.split('/').pop(),
                 isTimebolted: analysis.isTimebolted,
@@ -535,6 +659,17 @@ async function handleRequest(req: Request): Promise<Response> {
                 fileSize,
                 fileSizeBytes
               };
+
+              // Store in new cache with hash
+              if (fileHash) {
+                newVideoMetadataCache[videoPath] = {
+                  hash: fileHash,
+                  cachedAt: new Date().toISOString(),
+                  data: videoData
+                };
+              }
+
+              return videoData;
             })
           );
         }
@@ -543,6 +678,8 @@ async function handleRequest(req: Request): Promise<Response> {
     console.log(`⏱️  Video processing complete: ${Date.now() - processingStartTime}ms`);
 
     // Save status cache with file mtimes for validation
+    const cacheStartTime = Date.now();
+    console.log('💾 Preparing cache data...');
     const recordingsMtime = getFileMtime('lecture_recordings.json');
     const timesMtime = getFileMtime('times_simplified.json');
     const driveMtime = getFileMtime('drive-files.json');
@@ -551,23 +688,36 @@ async function handleRequest(req: Request): Promise<Response> {
       recordings,
       timesSimplified,
       driveFiles,
+      videoMetadataCache: newVideoMetadataCache,
       recordingsMtime,
       timesMtime,
       driveMtime,
       cachedAt: new Date().toISOString()
     };
 
-    Bun.write('status-cache.json', JSON.stringify(statusCacheData, null, 2));
-    console.log('💾 Saved status cache');
+    const stringifyStart = Date.now();
+    const cacheJson = JSON.stringify(statusCacheData, null, 2);
+    console.log(`   - JSON.stringify: ${Date.now() - stringifyStart}ms`);
+
+    const writeStart = Date.now();
+    await Bun.write('status-cache.json', cacheJson);
+    console.log(`   - File write: ${Date.now() - writeStart}ms`);
+    console.log(`⏱️  Total cache save time: ${Date.now() - cacheStartTime}ms`);
+
+    const responseStartTime = Date.now();
+    console.log('📤 Building response...');
+    const responseData = JSON.stringify({
+      recordings,
+      timesSimplified,
+      driveFiles
+    });
+    console.log(`   - Response JSON.stringify: ${Date.now() - responseStartTime}ms`);
+    console.log(`   - Response size: ${(responseData.length / 1024).toFixed(2)} KB`);
 
     const totalTime = Date.now() - apiStartTime;
     console.log(`✅ Total API response time: ${totalTime}ms (${(totalTime / 1000).toFixed(2)}s)\n`);
 
-    return new Response(JSON.stringify({
-      recordings,
-      timesSimplified,
-      driveFiles
-    }), { headers });
+    return new Response(responseData, { headers });
   }
 
   // API: Sync with Google Drive
@@ -879,7 +1029,10 @@ async function handleRequest(req: Request): Promise<Response> {
   if (path === '/api/upload' && req.method === 'POST') {
     try {
       const body = await req.json();
-      const { videoPath, studentGroup, date } = body;
+      const { videoPath, studentGroup, date, uploadId } = body;
+
+      // Generate upload ID if not provided
+      const finalUploadId = uploadId || `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
       if (!videoPath || !studentGroup || !date) {
         return new Response(JSON.stringify({
@@ -896,9 +1049,8 @@ async function handleRequest(req: Request): Promise<Response> {
         }), { headers, status: 404 });
       }
 
-      // Import Google Drive upload functionality
+      // Import Google Drive auth functionality
       const { google } = await import('googleapis');
-      const { createReadStream } = await import('fs');
 
       // Load credentials and token
       if (!existsSync('credentials.json') || !existsSync('token.json')) {
@@ -930,53 +1082,176 @@ async function handleRequest(req: Request): Promise<Response> {
         }), { headers, status: 400 });
       }
 
-      // Upload file
-      const drive = google.drive({ version: 'v3', auth: oAuth2Client });
+      // Prepare upload
       const filename = videoPath.split('/').pop() || '';
       const uploadFilename = `${studentGroup} - ${date}.mp4`;
 
-      const fileMetadata = {
+      // Get file size for progress tracking
+      const fileStats = statSync(videoPath);
+      const totalBytes = fileStats.size;
+
+      // Initialize progress
+      uploadProgress.set(finalUploadId, {
+        uploadId: finalUploadId,
+        filename,
+        bytesUploaded: 0,
+        bytesTotal: totalBytes,
+        percent: 0,
+        status: 'uploading'
+      });
+      emitProgress(finalUploadId);
+
+      console.log(`📤 Uploading ${filename} as ${uploadFilename} to ${studentGroup} folder (${formatFileSize(totalBytes)})...`);
+
+      // Get access token for direct API calls
+      const accessToken = await oAuth2Client.getAccessToken();
+      if (!accessToken.token) {
+        throw new Error('Failed to get access token');
+      }
+
+      // Step 1: Initiate resumable upload session
+      const metadata = {
         name: uploadFilename,
-        parents: [folderId]
+        parents: [folderId],
+        mimeType: 'video/mp4'
       };
 
-      const media = {
-        mimeType: 'video/mp4',
-        body: createReadStream(videoPath)
-      };
-
-      console.log(`Uploading ${filename} as ${uploadFilename} to ${studentGroup} folder...`);
-
-      const file = await drive.files.create({
-        requestBody: fileMetadata,
-        media: media,
-        fields: 'id, name, size'
+      const initResponse = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken.token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(metadata)
       });
 
-      console.log(`Upload complete! File ID: ${file.data.id}`);
-
-      // Update lecture_recordings.json to mark as uploaded
-      const recordings = loadJSON('lecture_recordings.json') || [];
-      const recording = recordings.find((r: any) => r.date === date && r.studentGroup === studentGroup);
-      if (recording) {
-        recording.uploaded = true;
+      const uploadUrl = initResponse.headers.get('Location');
+      if (!uploadUrl) {
+        throw new Error('Failed to get upload URL');
       }
-      Bun.write('lecture_recordings.json', JSON.stringify(recordings, null, 2));
 
-      // Sync with Drive to update drive-files.json
-      await execAsync('bun run sync-google-drive.ts');
+      console.log(`📍 Got upload session URL, starting chunked upload...`);
 
-      return new Response(JSON.stringify({
-        success: true,
-        fileId: file.data.id,
-        fileName: uploadFilename
-      }), { headers });
-    } catch (error: any) {
-      console.error('Upload error:', error);
+      // Step 2: Upload file in chunks with progress tracking
+      const CHUNK_SIZE = 256 * 1024; // 256KB chunks
+      const fileHandle = await Bun.file(videoPath);
+      const fileBuffer = await fileHandle.arrayBuffer();
+
+      let bytesUploaded = 0;
+      let lastEmittedPercent = -1;
+      let lastEmitTime = 0;
+      const EMIT_INTERVAL_MS = 1000;
+
+      // Upload in chunks
+      while (bytesUploaded < totalBytes) {
+        // Check if client cancelled the request
+        if (req.signal?.aborted) {
+          console.log(`🛑 Upload cancelled by client for ${filename}`);
+          throw new Error('Upload cancelled by client');
+        }
+
+        const start = bytesUploaded;
+        const end = Math.min(start + CHUNK_SIZE, totalBytes);
+        const chunk = fileBuffer.slice(start, end);
+
+        const chunkResponse = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'Content-Length': String(chunk.byteLength),
+            'Content-Range': `bytes ${start}-${end - 1}/${totalBytes}`
+          },
+          body: chunk
+        });
+
+        bytesUploaded = end;
+        const percent = Math.round((bytesUploaded / totalBytes) * 100);
+
+        const now = Date.now();
+        const timeSinceLastEmit = now - lastEmitTime;
+
+        // Emit progress updates (throttled)
+        if (percent !== lastEmittedPercent && timeSinceLastEmit >= EMIT_INTERVAL_MS) {
+          const progress = uploadProgress.get(finalUploadId);
+          if (progress) {
+            progress.bytesUploaded = bytesUploaded;
+            progress.percent = percent;
+            uploadProgress.set(finalUploadId, progress);
+            emitProgress(finalUploadId);
+            lastEmittedPercent = percent;
+            lastEmitTime = now;
+          }
+        }
+
+        // Check if upload is complete
+        if (chunkResponse.status === 200 || chunkResponse.status === 201) {
+          const file = await chunkResponse.json();
+          console.log(`✅ Upload complete! File ID: ${file.id}`);
+
+          // Ensure final 100% is emitted
+          const progress = uploadProgress.get(finalUploadId);
+          if (progress) {
+            progress.status = 'complete';
+            progress.bytesUploaded = totalBytes;
+            progress.percent = 100;
+            uploadProgress.set(finalUploadId, progress);
+            emitProgress(finalUploadId);
+
+            // Clean up after a delay
+            setTimeout(() => {
+              uploadProgress.delete(finalUploadId);
+              progressListeners.delete(finalUploadId);
+            }, 5000);
+          }
+
+          // Update lecture_recordings.json to mark as uploaded
+          const recordings = loadJSON('lecture_recordings.json') || [];
+          const recording = recordings.find((r: any) => r.date === date && r.studentGroup === studentGroup);
+          if (recording) {
+            recording.uploaded = true;
+          }
+          Bun.write('lecture_recordings.json', JSON.stringify(recordings, null, 2));
+
+          // Sync with Drive to update drive-files.json
+          await execAsync('bun run sync-google-drive.ts');
+
+          return new Response(JSON.stringify({
+            success: true,
+            fileId: file.id,
+            fileName: uploadFilename
+          }), { headers });
+        }
+      }
+
+      throw new Error('Upload completed but no success response received');
+    } catch (uploadError: any) {
+      const isCancelled = uploadError.message === 'Upload cancelled by client';
+
+      if (isCancelled) {
+        console.log(`❌ Upload cancelled: ${filename}`);
+      } else {
+        console.error('Direct upload error:', uploadError);
+      }
+
+      // Mark as error or cancelled
+      const progress = uploadProgress.get(finalUploadId);
+      if (progress) {
+        progress.status = isCancelled ? 'error' : 'error';
+        uploadProgress.set(finalUploadId, progress);
+        emitProgress(finalUploadId);
+
+        // Clean up after a delay
+        setTimeout(() => {
+          uploadProgress.delete(finalUploadId);
+          progressListeners.delete(finalUploadId);
+        }, 2000);
+      }
+
+      // Return error response instead of rethrowing
       return new Response(JSON.stringify({
         success: false,
-        error: error.message
-      }), { headers, status: 500 });
+        error: uploadError.message,
+        cancelled: isCancelled
+      }), { headers, status: isCancelled ? 499 : 500 });
     }
   }
 
@@ -1034,7 +1309,7 @@ try {
 serve({
   port: PORT,
   fetch: handleRequest,
-  idleTimeout: 600 // 10 minute timeout for large video uploads to Google Drive
+  idleTimeout: 255 // Maximum allowed by Bun (client has 10-minute timeout)
 });
 
 console.log(`🚀 Lecture Recording Dashboard running at http://localhost:${PORT}`);

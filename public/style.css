@@ -365,31 +365,13 @@ tr:hover {
     display: none;
 }
 
-/* Rotating spinner for upload (honest feedback) */
+/* Upload button styling */
 .btn-uploading {
     position: relative;
     opacity: 0.95;
     cursor: wait;
-    pointer-events: none;
+    pointer-events: auto;  /* Allow clicking to cancel */
     min-width: 32px;  /* Ensure consistent width */
-}
-
-.btn-uploading::before {
-    content: '';
-    position: absolute;
-    width: 14px;
-    height: 14px;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);  /* Better centering */
-    border-radius: 50%;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-top-color: white;
-    animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-    to { transform: rotate(360deg); }
 }
 
 /* Pulse animation for auth button attention */
