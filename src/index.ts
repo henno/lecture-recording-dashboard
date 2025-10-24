@@ -1514,12 +1514,12 @@ async function handleRequest(req: Request): Promise<Response> {
   if (path === '/api/upload' && req.method === 'POST') {
     try {
       const body = await req.json();
-      const { videoPath, studentGroup, date, uploadId } = body;
+      const { videoPath, date, uploadId } = body;
 
       // Generate upload ID if not provided
       const finalUploadId = uploadId || `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-      if (!videoPath || !studentGroup || !date) {
+      if (!videoPath || !date) {
         return new Response(JSON.stringify({
           success: false,
           error: 'Missing required parameters'
@@ -1533,6 +1533,23 @@ async function handleRequest(req: Request): Promise<Response> {
           error: 'Video file not found'
         }), { headers, status: 404 });
       }
+
+      // Extract filename and determine student group from filename
+      const filename = videoPath.split('/').pop() || '';
+
+      // Extract student group from filename (first word before " -")
+      const studyGroupNames = getStudyGroupNames();
+      const groupPattern = studyGroupNames.join('|');
+      const filenameStudentGroupMatch = filename.match(new RegExp(`^(${groupPattern})\\s*-`));
+
+      if (!filenameStudentGroupMatch) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: `Unable to determine student group from filename "${filename}". Filename must start with a known student group (${studyGroupNames.join(', ')}) followed by " - ".`
+        }), { headers, status: 400 });
+      }
+
+      const studentGroup = filenameStudentGroupMatch[1];
 
       // Import Google Drive auth functionality
       const { google } = await import('googleapis');
@@ -1552,7 +1569,7 @@ async function handleRequest(req: Request): Promise<Response> {
       const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
       oAuth2Client.setCredentials(token);
 
-      // Determine target folder based on student group
+      // Determine target folder based on student group extracted from filename
       const FOLDERS = loadStudyGroups();
 
       const folderId = FOLDERS[studentGroup];
@@ -1564,23 +1581,7 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       // Prepare upload
-      const filename = videoPath.split('/').pop() || '';
       const uploadFilename = `${studentGroup} - ${date}.mp4`;
-
-      // Validate that the filename matches the student group
-      // Expected formats: "TAK24 - 2025-10-16.mp4" or "TAK24 - 2025-10-16_02.mp4"
-      const studyGroupNames = getStudyGroupNames();
-      const groupPattern = studyGroupNames.join('|');
-      const filenameStudentGroupMatch = filename.match(new RegExp(`^(${groupPattern})\\s*-`));
-      if (filenameStudentGroupMatch) {
-        const filenameStudentGroup = filenameStudentGroupMatch[1];
-        if (filenameStudentGroup !== studentGroup) {
-          return new Response(JSON.stringify({
-            success: false,
-            error: `Student group mismatch: filename contains "${filenameStudentGroup}" but you're trying to upload to "${studentGroup}" folder. Please check the schedule assignment.`
-          }), { headers, status: 400 });
-        }
-      }
 
       // Get file size for progress tracking
       const fileStats = statSync(videoPath);
