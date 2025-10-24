@@ -243,10 +243,10 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
                     let fileSizeText = '';
                     if (driveFile?.size) {
                         const sizeInGB = driveFile.size / (1024 * 1024 * 1024);
-                    fileSizeText = sizeInGB >= 1
-                        ? `${Math.round(sizeInGB)} GB`
-                        : `${Math.round(driveFile.size / (1024 * 1024))} MB`;
-                }
+                        fileSizeText = sizeInGB >= 1
+                            ? `${Math.round(sizeInGB)} GB`
+                            : `${Math.round(driveFile.size / (1024 * 1024))} MB`;
+                    }
 
                 const highlightStyle = hasMatchingLocalSize ? 'background:yellow;color:black;font-weight:bold;' : '';
 
