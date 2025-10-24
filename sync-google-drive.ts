@@ -6,8 +6,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 const SCOPES = ['https://www.googleapis.com/auth/drive'];
-const TOKEN_PATH = 'token.json';
-const CREDENTIALS_PATH = 'credentials.json';
+const TOKEN_PATH = 'config/token.json';
+const CREDENTIALS_PATH = 'config/credentials.json';
 
 // Google Drive folder IDs
 const FOLDERS = {
@@ -129,11 +129,11 @@ async function main() {
     }
 
     // Write to uploaded-dates.json
-    writeFileSync('uploaded-dates.json', JSON.stringify(uploadedDates, null, 2));
+    writeFileSync('data/uploaded-dates.json', JSON.stringify(uploadedDates, null, 2));
     console.log('\n✅ Updated uploaded-dates.json');
 
     // Write drive file URLs to drive-files.json
-    writeFileSync('drive-files.json', JSON.stringify(driveFiles, null, 2));
+    writeFileSync('data/drive-files.json', JSON.stringify(driveFiles, null, 2));
     console.log('✅ Updated drive-files.json');
 
     // Run the main fetch script to update lecture_recordings.json

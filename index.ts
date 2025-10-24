@@ -40,7 +40,7 @@ interface InterruptedUpload {
 // Load interrupted uploads from disk
 function loadInterruptedUploads(): Record<string, InterruptedUpload> {
   try {
-    const data = loadJSON('active-uploads.json');
+    const data = loadJSON('data/active-uploads.json');
     return data || {};
   } catch (error) {
     return {};
@@ -51,14 +51,14 @@ function loadInterruptedUploads(): Record<string, InterruptedUpload> {
 function saveInterruptedUpload(videoPath: string, state: InterruptedUpload) {
   const uploads = loadInterruptedUploads();
   uploads[videoPath] = state;
-  Bun.write('active-uploads.json', JSON.stringify(uploads, null, 2));
+  Bun.write('data/active-uploads.json', JSON.stringify(uploads, null, 2));
 }
 
 // Remove interrupted upload (completed or cancelled)
 function removeInterruptedUpload(videoPath: string) {
   const uploads = loadInterruptedUploads();
   delete uploads[videoPath];
-  Bun.write('active-uploads.json', JSON.stringify(uploads, null, 2));
+  Bun.write('data/active-uploads.json', JSON.stringify(uploads, null, 2));
 }
 
 // Background upload function that continues independently of HTTP request
@@ -195,12 +195,12 @@ async function performBackgroundUpload(
           uploadAbortControllers.delete(uploadId);
 
           // Update lecture_recordings.json to mark as uploaded
-          const recordings = loadJSON('lecture_recordings.json') || [];
+          const recordings = loadJSON('data/lecture_recordings.json') || [];
           const recording = recordings.find((r: any) => r.date === date && r.studentGroup === studentGroup);
           if (recording) {
             recording.uploaded = true;
           }
-          Bun.write('lecture_recordings.json', JSON.stringify(recordings, null, 2));
+          Bun.write('data/lecture_recordings.json', JSON.stringify(recordings, null, 2));
 
           // Sync with Drive to update drive-files.json
           await execAsync('bun run sync-google-drive.ts');
@@ -260,7 +260,7 @@ function loadJSON(filename: string) {
 // Load timebolt cache
 function loadTimeboltCache() {
   try {
-    const cache = loadJSON('timebolted-cache.json');
+    const cache = loadJSON('data/timebolted-cache.json');
     return cache || { lastRun: null, results: {} };
   } catch (error) {
     return { lastRun: null, results: {} };
@@ -269,13 +269,13 @@ function loadTimeboltCache() {
 
 // Save timebolt cache
 function saveTimeboltCache(cache: any) {
-  Bun.write('timebolted-cache.json', JSON.stringify(cache, null, 2));
+  Bun.write('data/timebolted-cache.json', JSON.stringify(cache, null, 2));
 }
 
 // Load timestamp cache
 function loadTimestampCache() {
   try {
-    const cache = loadJSON('timestamp-cache.json');
+    const cache = loadJSON('data/timestamp-cache.json');
     return cache || { results: {} };
   } catch (error) {
     return { results: {} };
@@ -284,7 +284,7 @@ function loadTimestampCache() {
 
 // Save timestamp cache
 function saveTimestampCache(cache: any) {
-  Bun.write('timestamp-cache.json', JSON.stringify(cache, null, 2));
+  Bun.write('data/timestamp-cache.json', JSON.stringify(cache, null, 2));
 }
 
 // Get partial hash of file (first 300 bytes only for speed)
@@ -586,7 +586,7 @@ async function analyzeVideo(videoPath: string) {
   const hasTimeboltedInName = /timebolted|turbo|FINAL|BEST/i.test(filename);
 
   // Load manual tracking
-  const manualTracking = loadJSON('timebolted-videos.json') || {};
+  const manualTracking = loadJSON('data/timebolted-videos.json') || {};
   const isManuallyMarked = manualTracking[videoPath] === true;
 
   // If manually marked or obvious from filename, skip analysis
@@ -745,12 +745,12 @@ async function handleRequest(req: Request): Promise<Response> {
 
     // Check status cache first (unless force refresh)
     if (!forceRefresh) {
-      const statusCache = loadJSON('status-cache.json');
+      const statusCache = loadJSON('data/status-cache.json');
       if (statusCache) {
         // Validate cache: check if source files have changed
-        const recordingsMtime = getFileMtime('lecture_recordings.json');
-        const timesMtime = getFileMtime('times_simplified.json');
-        const driveMtime = getFileMtime('drive-files.json');
+        const recordingsMtime = getFileMtime('data/lecture_recordings.json');
+        const timesMtime = getFileMtime('data/times_simplified.json');
+        const driveMtime = getFileMtime('data/drive-files.json');
 
         if (statusCache.recordingsMtime === recordingsMtime &&
             statusCache.timesMtime === timesMtime &&
@@ -773,13 +773,13 @@ async function handleRequest(req: Request): Promise<Response> {
 
     const loadStartTime = Date.now();
     console.log('📂 Loading JSON files...');
-    const recordings = loadJSON('lecture_recordings.json') || [];
+    const recordings = loadJSON('data/lecture_recordings.json') || [];
     console.log(`   - lecture_recordings.json: ${Date.now() - loadStartTime}ms`);
     const timesLoadStart = Date.now();
-    const timesSimplified = loadJSON('times_simplified.json') || [];
+    const timesSimplified = loadJSON('data/times_simplified.json') || [];
     console.log(`   - times_simplified.json: ${Date.now() - timesLoadStart}ms`);
     const driveLoadStart = Date.now();
-    const driveFiles = loadJSON('drive-files.json') || {};
+    const driveFiles = loadJSON('data/drive-files.json') || {};
     console.log(`   - drive-files.json: ${Date.now() - driveLoadStart}ms`);
     console.log(`⏱️  Total JSON load time: ${Date.now() - loadStartTime}ms`);
 
@@ -802,7 +802,7 @@ async function handleRequest(req: Request): Promise<Response> {
     console.log(`📹 Processing ${totalVideos} videos across ${recordings.length} recordings`);
 
     // Load previous video metadata cache for MD5 comparison
-    const previousStatusCache = loadJSON('status-cache.json');
+    const previousStatusCache = loadJSON('data/status-cache.json');
     const videoMetadataCache = previousStatusCache?.videoMetadataCache || {};
 
     // Process ALL videos across ALL recordings in parallel
@@ -905,9 +905,9 @@ async function handleRequest(req: Request): Promise<Response> {
     // Save status cache with file mtimes for validation
     const cacheStartTime = Date.now();
     console.log('💾 Preparing cache data...');
-    const recordingsMtime = getFileMtime('lecture_recordings.json');
-    const timesMtime = getFileMtime('times_simplified.json');
-    const driveMtime = getFileMtime('drive-files.json');
+    const recordingsMtime = getFileMtime('data/lecture_recordings.json');
+    const timesMtime = getFileMtime('data/times_simplified.json');
+    const driveMtime = getFileMtime('data/drive-files.json');
 
     const statusCacheData = {
       recordings,
@@ -925,7 +925,7 @@ async function handleRequest(req: Request): Promise<Response> {
     console.log(`   - JSON.stringify: ${Date.now() - stringifyStart}ms`);
 
     const writeStart = Date.now();
-    await Bun.write('status-cache.json', cacheJson);
+    await Bun.write('data/status-cache.json', cacheJson);
     console.log(`   - File write: ${Date.now() - writeStart}ms`);
     console.log(`⏱️  Total cache save time: ${Date.now() - cacheStartTime}ms`);
 
@@ -1029,15 +1029,15 @@ async function handleRequest(req: Request): Promise<Response> {
       const { google } = await import('googleapis');
 
       // Load credentials and token
-      if (!existsSync('credentials.json') || !existsSync('token.json')) {
+      if (!existsSync('config/credentials.json') || !existsSync('config/token.json')) {
         return new Response(JSON.stringify({
           success: false,
           error: 'Google Drive not configured. Please run sync first.'
         }), { headers, status: 400 });
       }
 
-      const credentials = JSON.parse(readFileSync('credentials.json', 'utf-8'));
-      const token = JSON.parse(readFileSync('token.json', 'utf-8'));
+      const credentials = JSON.parse(readFileSync('config/credentials.json', 'utf-8'));
+      const token = JSON.parse(readFileSync('config/token.json', 'utf-8'));
 
       const { client_secret, client_id, redirect_uris } = credentials.installed;
       const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
@@ -1209,7 +1209,7 @@ async function handleRequest(req: Request): Promise<Response> {
 
   // API: Check Google Drive auth status
   if (path === '/api/auth/status' && req.method === 'GET') {
-    const hasToken = existsSync('token.json');
+    const hasToken = existsSync('config/token.json');
     return new Response(JSON.stringify({ authenticated: hasToken }), { headers });
   }
 
@@ -1217,7 +1217,7 @@ async function handleRequest(req: Request): Promise<Response> {
   if (path === '/api/auth/google' && req.method === 'GET') {
     try {
       const { google } = await import('googleapis');
-      const credentials = JSON.parse(readFileSync('credentials.json', 'utf-8'));
+      const credentials = JSON.parse(readFileSync('config/credentials.json', 'utf-8'));
       const { client_secret, client_id, redirect_uris } = credentials.installed;
       const oAuth2Client = new google.auth.OAuth2(
         client_id,
@@ -1258,7 +1258,7 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       const { google } = await import('googleapis');
-      const credentials = JSON.parse(readFileSync('credentials.json', 'utf-8'));
+      const credentials = JSON.parse(readFileSync('config/credentials.json', 'utf-8'));
       const { client_secret, client_id } = credentials.installed;
       const oAuth2Client = new google.auth.OAuth2(
         client_id,
@@ -1270,7 +1270,7 @@ async function handleRequest(req: Request): Promise<Response> {
       oAuth2Client.setCredentials(tokens);
 
       // Save token
-      await Bun.write('token.json', JSON.stringify(tokens, null, 2));
+      await Bun.write('config/token.json', JSON.stringify(tokens, null, 2));
 
       return new Response(`
         <html>
@@ -1339,8 +1339,8 @@ async function handleRequest(req: Request): Promise<Response> {
         await execAsync('bun run fetch-lesson-times.ts');
 
         // Update cache incrementally (remove the video without full rebuild)
-        if (existsSync('status-cache.json')) {
-          const statusCache = loadJSON('status-cache.json');
+        if (existsSync('data/status-cache.json')) {
+          const statusCache = loadJSON('data/status-cache.json');
           if (statusCache && statusCache.recordings) {
             // Remove the deleted video from all recordings in cache
             statusCache.recordings.forEach((rec: any) => {
@@ -1353,10 +1353,10 @@ async function handleRequest(req: Request): Promise<Response> {
             });
 
             // Update cache mtimes to reflect new state
-            statusCache.recordingsMtime = getFileMtime('lecture_recordings.json');
+            statusCache.recordingsMtime = getFileMtime('data/lecture_recordings.json');
             statusCache.cachedAt = new Date().toISOString();
 
-            Bun.write('status-cache.json', JSON.stringify(statusCache, null, 2));
+            Bun.write('data/status-cache.json', JSON.stringify(statusCache, null, 2));
           }
         }
 
@@ -1388,8 +1388,8 @@ async function handleRequest(req: Request): Promise<Response> {
         await execAsync('bun run fetch-lesson-times.ts');
 
         // Clear status cache to force rebuild
-        if (existsSync('status-cache.json')) {
-          unlinkSync('status-cache.json');
+        if (existsSync('data/status-cache.json')) {
+          unlinkSync('data/status-cache.json');
         }
 
         return new Response(JSON.stringify({ success: true }), { headers });
@@ -1448,8 +1448,8 @@ async function handleRequest(req: Request): Promise<Response> {
       await execAsync('bun run fetch-lesson-times.ts');
 
       // Update cache incrementally (rename the video without full rebuild)
-      if (existsSync('status-cache.json')) {
-        const statusCache = loadJSON('status-cache.json');
+      if (existsSync('data/status-cache.json')) {
+        const statusCache = loadJSON('data/status-cache.json');
         if (statusCache && statusCache.recordings) {
           // Update the renamed video in all recordings in cache
           statusCache.recordings.forEach((rec: any) => {
@@ -1470,10 +1470,10 @@ async function handleRequest(req: Request): Promise<Response> {
           });
 
           // Update cache mtimes to reflect new state
-          statusCache.recordingsMtime = getFileMtime('lecture_recordings.json');
+          statusCache.recordingsMtime = getFileMtime('data/lecture_recordings.json');
           statusCache.cachedAt = new Date().toISOString();
 
-          Bun.write('status-cache.json', JSON.stringify(statusCache, null, 2));
+          Bun.write('data/status-cache.json', JSON.stringify(statusCache, null, 2));
         }
       }
 
@@ -1514,15 +1514,15 @@ async function handleRequest(req: Request): Promise<Response> {
       const { google } = await import('googleapis');
 
       // Load credentials and token
-      if (!existsSync('credentials.json') || !existsSync('token.json')) {
+      if (!existsSync('config/credentials.json') || !existsSync('config/token.json')) {
         return new Response(JSON.stringify({
           success: false,
           error: 'Google Drive not configured. Please run sync first.'
         }), { headers, status: 400 });
       }
 
-      const credentials = JSON.parse(readFileSync('credentials.json', 'utf-8'));
-      const token = JSON.parse(readFileSync('token.json', 'utf-8'));
+      const credentials = JSON.parse(readFileSync('config/credentials.json', 'utf-8'));
+      const token = JSON.parse(readFileSync('config/token.json', 'utf-8'));
 
       const { client_secret, client_id, redirect_uris } = credentials.installed;
       const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
@@ -1688,10 +1688,10 @@ async function handleRequest(req: Request): Promise<Response> {
       const body = await req.json();
       const { videoPath, isTimebolted } = body;
 
-      const tracking = loadJSON('timebolted-videos.json') || {};
+      const tracking = loadJSON('data/timebolted-videos.json') || {};
       tracking[videoPath] = isTimebolted;
 
-      Bun.write('timebolted-videos.json', JSON.stringify(tracking, null, 2));
+      Bun.write('data/timebolted-videos.json', JSON.stringify(tracking, null, 2));
 
       return new Response(JSON.stringify({ success: true }), { headers });
     } catch (error: any) {

@@ -46,20 +46,9 @@ async function fetchLessonTimes() {
         studentGroup: lesson.studentGroups[0].code
       }));
 
-    await Bun.write("times.json", JSON.stringify(lessonTimes));
+    await Bun.write("data/times.json", JSON.stringify(lessonTimes));
 
     console.log(`Successfully saved ${lessonTimes.length} lesson times to times.json`);
-
-    // Create CSV version
-    const csvHeader = "date,start,end,studentGroup\n";
-    const csvRows = lessonTimes.map(lesson =>
-      `${lesson.date},${lesson.start},${lesson.end},${lesson.studentGroup}`
-    ).join("\n");
-    const csvContent = csvHeader + csvRows;
-
-    await Bun.write("times.csv", csvContent);
-
-    console.log(`Successfully saved ${lessonTimes.length} lesson times to times.csv`);
 
     // Create simplified version - group by date AND student group
     const lessonsByDateAndGroup = new Map<string, { date: string; start: string; end: string; studentGroup: string }>();
@@ -87,20 +76,9 @@ async function fetchLessonTimes() {
 
     const simplified = Array.from(lessonsByDateAndGroup.values());
 
-    await Bun.write("times_simplified.json", JSON.stringify(simplified));
+    await Bun.write("data/times_simplified.json", JSON.stringify(simplified));
 
     console.log(`Successfully saved ${simplified.length} simplified lesson times to times_simplified.json`);
-
-    // Create simplified CSV version
-    const simplifiedCsvHeader = "date,start,end,studentGroup\n";
-    const simplifiedCsvRows = simplified.map(lesson =>
-      `${lesson.date},${lesson.start},${lesson.end},${lesson.studentGroup}`
-    ).join("\n");
-    const simplifiedCsvContent = simplifiedCsvHeader + simplifiedCsvRows;
-
-    await Bun.write("times_simplified.csv", simplifiedCsvContent);
-
-    console.log(`Successfully saved ${simplified.length} simplified lesson times to times_simplified.csv`);
 
     // Scan Zoom folders and match with lesson dates
     const zoomDir = join(homedir(), "Documents", "Zoom");
@@ -174,7 +152,7 @@ async function fetchLessonTimes() {
       // Load uploaded dates
       let uploadedDates: { [key: string]: string[] } = {};
       try {
-        const uploadedFile = await Bun.file("uploaded-dates.json");
+        const uploadedFile = await Bun.file("data/uploaded-dates.json");
         uploadedDates = await uploadedFile.json();
       } catch (error) {
         console.log("No uploaded-dates.json found, all recordings marked as not uploaded");
@@ -189,7 +167,7 @@ async function fetchLessonTimes() {
       // Sort recordings by date chronologically
       matchingRecordings.sort((a, b) => a.date.localeCompare(b.date));
 
-      await Bun.write("lecture_recordings.json", JSON.stringify(matchingRecordings, null, 2));
+      await Bun.write("data/lecture_recordings.json", JSON.stringify(matchingRecordings, null, 2));
       console.log(`Successfully saved ${matchingRecordings.length} matching lecture recordings to lecture_recordings.json`);
     } catch (error) {
       console.error("Error scanning Zoom folders:", error);

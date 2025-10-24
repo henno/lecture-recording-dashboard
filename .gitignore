@@ -1,34 +1,18 @@
-# Credentials and tokens
-credentials.json
-token.json
-client_secret_*.json
+# Configuration directory (credentials)
+config/
 
-# Cache files
-timestamp-cache.json
-timebolted-cache.json
-status-cache.json
-
-# Runtime state files
-active-uploads.json
-uploaded-dates.json
+# Data directory (generated files)
+data/
 
 # Debug and test files
 debug_frames/
 temp/
 debug_*.png
 test_*.png
-bench-hash.ts
-test.js
-times*.csv
-times*.json
 
 # Node modules and dependencies
 node_modules/
 bun.lockb
-
-# Data files (contain local paths)
-lecture_recordings.json
-drive-files.json
 
 # IDE files
 .idea/
