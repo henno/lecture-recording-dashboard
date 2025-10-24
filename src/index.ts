@@ -716,14 +716,14 @@ async function handleRequest(req: Request): Promise<Response> {
 
   // Serve static files
   if (path === '/' || path === '/index.html') {
-    const html = readFileSync(join(__dirname, 'public', 'index.html'), 'utf-8');
+    const html = readFileSync(join(__dirname, '..', 'public', 'index.html'), 'utf-8');
     return new Response(html, {
       headers: { 'Content-Type': 'text/html' }
     });
   }
 
   if (path.startsWith('/public/')) {
-    const filePath = join(__dirname, path);
+    const filePath = join(__dirname, '..', path);
     if (existsSync(filePath)) {
       const content = readFileSync(filePath, 'utf-8');
       const contentType = path.endsWith('.css') ? 'text/css' :

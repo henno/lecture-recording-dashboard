@@ -59,14 +59,14 @@ bun install
      - Name: "Lecture Recording Dashboard"
      - Click "Create"
    - Download the JSON file
-   - Rename it to `credentials.json` and place it in the project root
+   - Rename it to `credentials.json` and place it in the `config/` directory
 
 4. **Set Up Google Drive Folders**
    - Create folders in Google Drive for each student group
    - Get folder IDs from URL (e.g., `https://drive.google.com/drive/folders/FOLDER_ID_HERE`)
-   - Update folder IDs in `index.ts` (lines 919-923):
+   - Update folder IDs in `src/sync-google-drive.ts` (lines 13-16):
      ```typescript
-     const FOLDERS: { [key: string]: string } = {
+     const FOLDERS = {
        TAK24: 'YOUR_FOLDER_ID_HERE',
        IS24: 'YOUR_FOLDER_ID_HERE',
        TAK25: 'YOUR_FOLDER_ID_HERE'
@@ -75,33 +75,32 @@ bun install
 
 ## Project Setup
 
-1. **Configure lesson times**
-   - Create `times_simplified.json` with lecture schedules:
-     ```json
-     [
-       {
-         "date": "2025-10-15",
-         "studentGroup": "TAK24",
-         "start": "09:00",
-         "end": "12:00"
-       }
-     ]
-     ```
-
-2. **Scan for recordings**
+1. **Fetch lesson times and scan recordings**
    ```bash
-   bun run fetch-lesson-times.ts
+   bun run fetch
+   ```
+   This fetches lesson schedules from the API and scans for local recordings.
+
+2. **Start the development server**
+   ```bash
+   bun run dev
+   ```
+   Or for production:
+   ```bash
+   bun run start
    ```
 
-3. **Start the server**
-   ```bash
-   bun run index.ts
-   ```
-
-4. **Open dashboard**
+3. **Open dashboard**
    - Navigate to `http://localhost:3000`
    - Click "Authorize Google Drive" (first time only)
    - Complete OAuth authorization in popup window
+
+## Available Scripts
+
+- `bun run dev` - Start development server with auto-reload
+- `bun run start` - Start production server
+- `bun run fetch` - Fetch lesson times and scan for recordings
+- `bun run sync` - Sync with Google Drive to update upload status
 
 ## Usage
 
@@ -113,9 +112,11 @@ Click "Refresh" to scan filesystem for new recordings and update the dashboard.
 
 ### Upload to Google Drive
 1. Find the recording you want to upload
-2. Click the cloud icon (☁️) next to the video
+2. Click the green cloud icon (☁️) next to the video
 3. Confirm the upload
-4. Wait for the spinner to complete
+4. Monitor progress with the orange spinner button
+5. Upload continues in background even if you close the browser
+6. Can pause uploads with the orange button and resume later with blue play button
 
 ### Rename Video
 1. Click the pencil icon (✏️) next to the video
@@ -127,20 +128,33 @@ Click the trash icon (🗑️) to delete a video or empty folder.
 
 ## File Structure
 
-- `index.ts` - Main server and API routes
-- `fetch-lesson-times.ts` - Scans filesystem for recordings
-- `sync-google-drive.ts` - Syncs with Google Drive
-- `public/` - Frontend files (HTML, CSS, JS)
-- `credentials.json` - Google OAuth credentials (not in repo)
-- `token.json` - OAuth token (auto-generated)
-- `lecture_recordings.json` - Local recordings data
-- `drive-files.json` - Google Drive files cache
-- `times_simplified.json` - Lecture schedules
+```
+.
+├── config/                    # Configuration files (not in repo)
+│   ├── credentials.json       # Google OAuth credentials
+│   └── token.json             # OAuth token (auto-generated)
+├── data/                      # Generated data files (not in repo)
+│   ├── lecture_recordings.json    # Local recordings data
+│   ├── drive-files.json           # Google Drive files cache
+│   ├── times_simplified.json      # Lesson schedules
+│   ├── active-uploads.json        # Resume state for interrupted uploads
+│   └── *-cache.json               # Various caches for performance
+├── public/                    # Frontend assets
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
+├── src/                       # Source code
+│   ├── index.ts               # Main server and API routes
+│   ├── fetch-lesson-times.ts # Fetches schedules and scans recordings
+│   └── sync-google-drive.ts  # Syncs with Google Drive
+├── package.json
+└── README.md
+```
 
 ## Troubleshooting
 
 **"Google Drive not configured" error**
-- Ensure `credentials.json` exists in project root
+- Ensure `credentials.json` exists in `config/` directory
 - Run authorization flow via dashboard
 
 **Lost or deleted credentials.json file**
@@ -150,9 +164,9 @@ Click the trash icon (🗑️) to delete a video or empty folder.
   2. Click on your existing OAuth 2.0 Client ID
   3. Click "Add Secret" to generate a new client secret
   4. Download the new JSON file
-  5. Save it as `credentials.json` in the project root
+  5. Save it as `credentials.json` in the `config/` directory
   6. In Google Console, disable the old secret, then delete it
-  7. Re-authorize the app at `http://localhost:3000` (this will create a new `token.json`)
+  7. Re-authorize the app at `http://localhost:3000` (this will create a new `token.json` in `config/`)
 
 **Upload shows 100% immediately**
 - This is expected - the spinner shows upload is in progress
@@ -163,14 +177,14 @@ Click the trash icon (🗑️) to delete a video or empty folder.
 - Check `debug_frames/` folder for OCR debug images
 
 **Videos not detected**
-- Run `bun run fetch-lesson-times.ts` to rescan filesystem
+- Run `bun run fetch` to rescan filesystem
 - Check that videos are in `/Users/henno/Documents/Zoom/` subdirectories
 
 ## Port Configuration
 
 Server runs on port 3000 by default. To change:
 ```typescript
-// index.ts, line 11
+// src/index.ts, line 11
 const PORT = 3000; // Change to your preferred port
 ```
 
