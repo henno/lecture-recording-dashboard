@@ -214,31 +214,35 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     groupRecordings.forEach(rec => {
         if (rec.uploaded) {
             const driveKey = `${rec.studentGroup}:${rec.date}`;
-            const driveFile = driveFiles[driveKey];
+            const driveFilesList = driveFiles[driveKey];
 
-            if (driveFile?.name && driveFile?.url && driveFile?.id) {
-                // Skip if already added
-                if (addedDriveFiles.has(driveFile.id)) {
-                    return;
-                }
-                addedDriveFiles.add(driveFile.id);
+            // Handle both old format (single object) and new format (array)
+            const filesToDisplay = Array.isArray(driveFilesList) ? driveFilesList : (driveFilesList ? [driveFilesList] : []);
 
-                // Check if any local video file size matches the Drive file size
-                let hasMatchingLocalSize = false;
-                groupRecordings.forEach(r => {
-                    if (r.videosWithStatus && r.videosWithStatus.length > 0) {
-                        hasMatchingLocalSize = hasMatchingLocalSize || r.videosWithStatus.some(video => {
-                            if (!video.fileSizeBytes) return false;
-                            const diff = Math.abs(driveFile.size - video.fileSizeBytes);
-                            const tolerance = driveFile.size * 0.01; // 1% tolerance
-                            return diff <= tolerance;
-                        });
+            filesToDisplay.forEach(driveFile => {
+                if (driveFile?.name && driveFile?.url && driveFile?.id) {
+                    // Skip if already added
+                    if (addedDriveFiles.has(driveFile.id)) {
+                        return;
                     }
-                });
+                    addedDriveFiles.add(driveFile.id);
 
-                let fileSizeText = '';
-                if (driveFile?.size) {
-                    const sizeInGB = driveFile.size / (1024 * 1024 * 1024);
+                    // Check if any local video file size matches the Drive file size
+                    let hasMatchingLocalSize = false;
+                    groupRecordings.forEach(r => {
+                        if (r.videosWithStatus && r.videosWithStatus.length > 0) {
+                            hasMatchingLocalSize = hasMatchingLocalSize || r.videosWithStatus.some(video => {
+                                if (!video.fileSizeBytes) return false;
+                                const diff = Math.abs(driveFile.size - video.fileSizeBytes);
+                                const tolerance = driveFile.size * 0.01; // 1% tolerance
+                                return diff <= tolerance;
+                            });
+                        }
+                    });
+
+                    let fileSizeText = '';
+                    if (driveFile?.size) {
+                        const sizeInGB = driveFile.size / (1024 * 1024 * 1024);
                     fileSizeText = sizeInGB >= 1
                         ? `${Math.round(sizeInGB)} GB`
                         : `${Math.round(driveFile.size / (1024 * 1024))} MB`;
@@ -252,7 +256,8 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
                     size: fileSizeText,
                     highlight: highlightStyle
                 });
-            }
+                }
+            });
         }
     });
 
@@ -293,13 +298,20 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
             rec.videosWithStatus.forEach(video => {
                 // Get drive file size for comparison
                 const driveKey = `${rec.studentGroup}:${rec.date}`;
-                const driveFile = driveFiles[driveKey];
+                const driveFilesList = driveFiles[driveKey];
                 let isMatchingSize = false;
 
-                if (driveFile?.size && video.fileSizeBytes) {
-                    const diff = Math.abs(driveFile.size - video.fileSizeBytes);
-                    const tolerance = driveFile.size * 0.01;
-                    isMatchingSize = diff <= tolerance;
+                // Handle both old format (single object) and new format (array)
+                const filesToCheck = Array.isArray(driveFilesList) ? driveFilesList : (driveFilesList ? [driveFilesList] : []);
+
+                // Check if this video matches any of the Drive files
+                if (video.fileSizeBytes) {
+                    isMatchingSize = filesToCheck.some(driveFile => {
+                        if (!driveFile?.size) return false;
+                        const diff = Math.abs(driveFile.size - video.fileSizeBytes);
+                        const tolerance = driveFile.size * 0.01;
+                        return diff <= tolerance;
+                    });
                 }
 
                 localVideos.push({

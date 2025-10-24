@@ -111,7 +111,7 @@ async function main() {
     const auth = await authorize();
     const FOLDERS = loadStudyGroups();
     const uploadedDates: { [key: string]: string[] } = {};
-    const driveFiles: { [key: string]: { id: string, name: string, url: string } } = {};
+    const driveFiles: { [key: string]: Array<{ id: string, name: string, url: string, size: number }> } = {};
 
     for (const [group, folderId] of Object.entries(FOLDERS)) {
       console.log(`\n📂 Checking ${group} folder...`);
@@ -123,14 +123,17 @@ async function main() {
         const date = extractDateFromFilename(file.name || '');
         if (date && file.id) {
           dates.add(date);
-          // Store file info with Drive URL (key: "group:date")
+          // Store file info with Drive URL (key: "group:date", value: array of files)
           const key = `${group}:${date}`;
-          driveFiles[key] = {
+          if (!driveFiles[key]) {
+            driveFiles[key] = [];
+          }
+          driveFiles[key].push({
             id: file.id,
             name: file.name || '',
             url: `https://drive.google.com/file/d/${file.id}/view`,
             size: file.size ? parseInt(file.size) : 0
-          };
+          });
           console.log(`  ✓ Found: ${file.name} (${date})`);
         }
       });
