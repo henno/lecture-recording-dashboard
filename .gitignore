@@ -1,5 +1,6 @@
 # Configuration directory (credentials)
 config/
+!config/*.example
 
 # Data directory (generated files)
 data/

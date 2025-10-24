@@ -8,13 +8,22 @@ import { homedir } from 'os';
 const SCOPES = ['https://www.googleapis.com/auth/drive'];
 const TOKEN_PATH = 'config/token.json';
 const CREDENTIALS_PATH = 'config/credentials.json';
+const STUDY_GROUPS_PATH = 'config/study-groups.json';
 
-// Google Drive folder IDs
-const FOLDERS = {
-  TAK24: '1IaLQwslFddy8KhxPUtg67o34pEPETrai',
-  IS24: '1xDunwzOWa1B6xbMQYZRlSuS2Yai_uyAp',
-  TAK25: '1njVYojvTuVVkNIpsZP0k3Cz_YHUhdHwg'
-};
+/**
+ * Load study groups configuration
+ * Returns object mapping study group names to Google Drive folder IDs
+ */
+function loadStudyGroups(): { [key: string]: string } {
+  if (!existsSync(STUDY_GROUPS_PATH)) {
+    throw new Error(
+      `Missing study-groups.json file.\n\n` +
+      `Please create ${STUDY_GROUPS_PATH} with your study group configurations.\n` +
+      `See config/study-groups.json.example for the required format.`
+    );
+  }
+  return JSON.parse(readFileSync(STUDY_GROUPS_PATH, 'utf-8'));
+}
 
 /**
  * Load or request authorization to call APIs.
@@ -100,6 +109,7 @@ async function main() {
     console.log('🚀 Syncing with Google Drive...\n');
 
     const auth = await authorize();
+    const FOLDERS = loadStudyGroups();
     const uploadedDates: { [key: string]: string[] } = {};
     const driveFiles: { [key: string]: { id: string, name: string, url: string } } = {};
 

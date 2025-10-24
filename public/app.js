@@ -104,6 +104,7 @@ async function loadData(forceRefresh = false) {
         }
 
         const renderStart = performance.now();
+        populateGroupFilter();
         renderRecordings();
         const renderEnd = performance.now();
         console.log(`⏱️  Render time: ${(renderEnd - renderStart).toFixed(0)}ms`);
@@ -405,6 +406,30 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     tr.innerHTML = rowHTML;
 
     return tr;
+}
+
+// Populate group filter dropdown from actual data
+function populateGroupFilter() {
+    const filterSelect = document.getElementById('filter-group');
+    const currentValue = filterSelect.value; // Preserve current selection
+
+    // Extract unique student groups from recordings
+    const uniqueGroups = [...new Set(recordings.map(rec => rec.studentGroup))].sort();
+
+    // Keep "All" option and rebuild the rest
+    filterSelect.innerHTML = '<option value="">All</option>';
+
+    uniqueGroups.forEach(group => {
+        const option = document.createElement('option');
+        option.value = group;
+        option.textContent = group;
+        filterSelect.appendChild(option);
+    });
+
+    // Restore previous selection if it still exists
+    if (currentValue && uniqueGroups.includes(currentValue)) {
+        filterSelect.value = currentValue;
+    }
 }
 
 // Update summary counts

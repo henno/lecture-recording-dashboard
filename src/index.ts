@@ -9,6 +9,30 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 const PORT = 3000;
+const STUDY_GROUPS_PATH = 'config/study-groups.json';
+
+/**
+ * Load study groups configuration
+ * Returns object mapping study group names to Google Drive folder IDs
+ */
+function loadStudyGroups(): { [key: string]: string } {
+  if (!existsSync(STUDY_GROUPS_PATH)) {
+    throw new Error(
+      `Missing study-groups.json file.\n\n` +
+      `Please create ${STUDY_GROUPS_PATH} with your study group configurations.\n` +
+      `See config/study-groups.json.example for the required format.`
+    );
+  }
+  return JSON.parse(readFileSync(STUDY_GROUPS_PATH, 'utf-8'));
+}
+
+/**
+ * Get list of study group names dynamically
+ */
+function getStudyGroupNames(): string[] {
+  const studyGroups = loadStudyGroups();
+  return Object.keys(studyGroups);
+}
 
 // Upload progress tracking
 interface UploadProgress {
@@ -1529,11 +1553,7 @@ async function handleRequest(req: Request): Promise<Response> {
       oAuth2Client.setCredentials(token);
 
       // Determine target folder based on student group
-      const FOLDERS: { [key: string]: string } = {
-        TAK24: '1IaLQwslFddy8KhxPUtg67o34pEPETrai',
-        IS24: '1xDunwzOWa1B6xbMQYZRlSuS2Yai_uyAp',
-        TAK25: '1njVYojvTuVVkNIpsZP0k3Cz_YHUhdHwg'
-      };
+      const FOLDERS = loadStudyGroups();
 
       const folderId = FOLDERS[studentGroup];
       if (!folderId) {
@@ -1549,7 +1569,9 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // Validate that the filename matches the student group
       // Expected formats: "TAK24 - 2025-10-16.mp4" or "TAK24 - 2025-10-16_02.mp4"
-      const filenameStudentGroupMatch = filename.match(/^(TAK24|TAK25|IS24)\s*-/);
+      const studyGroupNames = getStudyGroupNames();
+      const groupPattern = studyGroupNames.join('|');
+      const filenameStudentGroupMatch = filename.match(new RegExp(`^(${groupPattern})\\s*-`));
       if (filenameStudentGroupMatch) {
         const filenameStudentGroup = filenameStudentGroupMatch[1];
         if (filenameStudentGroup !== studentGroup) {

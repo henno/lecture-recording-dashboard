@@ -61,16 +61,20 @@ bun install
    - Download the JSON file
    - Rename it to `credentials.json` and place it in the `config/` directory
 
-4. **Set Up Google Drive Folders**
+4. **Configure Study Groups**
    - Create folders in Google Drive for each student group
    - Get folder IDs from URL (e.g., `https://drive.google.com/drive/folders/FOLDER_ID_HERE`)
-   - Update folder IDs in `src/sync-google-drive.ts` (lines 13-16):
-     ```typescript
-     const FOLDERS = {
-       TAK24: 'YOUR_FOLDER_ID_HERE',
-       IS24: 'YOUR_FOLDER_ID_HERE',
-       TAK25: 'YOUR_FOLDER_ID_HERE'
-     };
+   - Copy the example configuration:
+     ```bash
+     cp config/study-groups.json.example config/study-groups.json
+     ```
+   - Edit `config/study-groups.json` with your folder IDs:
+     ```json
+     {
+       "TAK24": "1IaLQwslFddy8KhxPUtg67o34pEPETrai",
+       "TAK25": "1njVYojvTuVVkNIpsZP0k3Cz_YHUhdHwg",
+       "IS24": "1xDunwzOWa1B6xbMQYZRlSuS2Yai_uyAp"
+     }
      ```
 
 ## Project Setup
@@ -132,6 +136,8 @@ Click the trash icon (🗑️) to delete a video or empty folder.
 .
 ├── config/                    # Configuration files (not in repo)
 │   ├── credentials.json       # Google OAuth credentials
+│   ├── study-groups.json      # Study group → Drive folder ID mapping
+│   ├── study-groups.json.example  # Example configuration (in repo)
 │   └── token.json             # OAuth token (auto-generated)
 ├── data/                      # Generated data files (not in repo)
 │   ├── lecture_recordings.json    # Local recordings data
