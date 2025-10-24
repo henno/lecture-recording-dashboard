@@ -1,5 +1,6 @@
 let recordings = [];
 let driveFiles = {};
+let interruptedUploads = {}; // Map of videoPath -> InterruptedUpload state
 let filters = {
     missing: true,
     notUploaded: true,
@@ -28,6 +29,79 @@ async function loadData(forceRefresh = false) {
 
         recordings = data.recordings;
         driveFiles = data.driveFiles || {};
+
+        // Fetch interrupted uploads
+        try {
+            const interruptedResponse = await fetch('/api/interrupted-uploads');
+            interruptedUploads = await interruptedResponse.json();
+        } catch (e) {
+            console.warn('Failed to load interrupted uploads:', e);
+            interruptedUploads = {};
+        }
+
+        // Fetch active uploads (currently in progress on server)
+        try {
+            const activeResponse = await fetch('/api/active-uploads');
+            const activeUploadsFromServer = await activeResponse.json();
+
+            // Restore active uploads to frontend state
+            for (const [videoPath, state] of Object.entries(activeUploadsFromServer)) {
+                console.log(`🔄 Restoring active upload: ${videoPath.split('/').pop()} at ${state.percent}%`);
+
+                // Create EventSource to receive progress updates
+                const eventSource = new EventSource(`/api/upload-progress/${state.uploadId}`);
+
+                // Store in activeUploads Map
+                activeUploads.set(videoPath, {
+                    xhr: null, // No XHR handle since we're reconnecting
+                    eventSource: eventSource,
+                    progress: {
+                        percent: state.percent,
+                        bytesUploaded: state.bytesUploaded,
+                        bytesTotal: state.bytesTotal,
+                        status: state.status
+                    }
+                });
+
+                // Set up progress listener
+                eventSource.onmessage = (event) => {
+                    try {
+                        const progress = JSON.parse(event.data);
+                        const uploadState = activeUploads.get(videoPath);
+                        if (uploadState) {
+                            uploadState.progress = progress;
+                            updateUploadButton(videoPath, progress);
+                            console.log(`📊 Progress update: ${videoPath.split('/').pop()} - ${progress.percent}%`);
+
+                            // If complete, reload page
+                            if (progress.status === 'complete') {
+                                eventSource.close();
+                                activeUploads.delete(videoPath);
+                                setTimeout(() => loadData(), 1000);
+                            }
+
+                            // If paused by user or error (network disconnect), clean up and show as interrupted
+                            if (progress.status === 'paused' || progress.status === 'error') {
+                                const statusMsg = progress.status === 'paused' ? '⏸️  Upload paused' : '❌ Upload error detected';
+                                console.log(`${statusMsg} for ${videoPath.split('/').pop()} - will show as interrupted`);
+                                eventSource.close();
+                                activeUploads.delete(videoPath);
+                                // Re-render to show blue play button (interrupted/paused state)
+                                renderRecordings();
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error parsing progress data:', e);
+                    }
+                };
+
+                eventSource.onerror = (error) => {
+                    console.error('SSE connection error:', error);
+                };
+            }
+        } catch (e) {
+            console.warn('Failed to load active uploads:', e);
+        }
 
         const renderStart = performance.now();
         renderRecordings();
@@ -399,6 +473,13 @@ const activeUploads = new Map();
 function getUploadButtonHTML(videoPath, studentGroup, date) {
     const uploadState = activeUploads.get(videoPath);
 
+    // Check for interrupted upload first (before checking active uploads)
+    if (!uploadState && interruptedUploads[videoPath]) {
+        const interrupted = interruptedUploads[videoPath];
+        const percent = Math.round((interrupted.bytesUploaded / interrupted.bytesTotal) * 100);
+        return `<button class="btn-action btn-upload" data-video-path="${videoPath.replace(/'/g, '&apos;')}" onclick="resumeUpload('${videoPath.replace(/'/g, "\\'")}', '${studentGroup}', '${date}')" style="background: linear-gradient(180deg, #007AFF 0%, #0051D5 100%); color: white; font-size: 0.7rem; font-weight: 600;">▶️ ${percent}%</button>`;
+    }
+
     if (!uploadState) {
         // Not uploading - show cloud icon
         return `<button class="btn-action btn-upload" data-video-path="${videoPath.replace(/'/g, '&apos;')}" onclick="uploadVideo('${videoPath.replace(/'/g, "\\'")}', '${studentGroup}', '${date}')">☁️</button>`;
@@ -446,13 +527,38 @@ function updateUploadButton(videoPath, progress) {
 async function uploadVideo(videoPath, studentGroup, date) {
     // Check if already uploading
     if (activeUploads.has(videoPath)) {
-        // Cancel upload
-        if (!confirm('Cancel upload?')) {
+        // Pause upload
+        if (!confirm('Pause upload? You can resume it later.')) {
             return;
         }
+
+        console.log('⏸️  Pausing upload...');
+
+        // Call backend to pause the upload
+        try {
+            const response = await fetch('/api/pause-upload', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ videoPath })
+            });
+
+            const result = await response.json();
+            if (!result.success) {
+                console.error('Failed to pause upload:', result.error);
+                alert('Failed to pause upload: ' + result.error);
+                return;
+            }
+
+            console.log('✅ Upload paused successfully');
+        } catch (error) {
+            console.error('Error pausing upload:', error);
+            alert('Error pausing upload: ' + error.message);
+            return;
+        }
+
+        // Clean up frontend state
         const uploadState = activeUploads.get(videoPath);
-        uploadState.xhr.abort();
-        if (uploadState.eventSource) {
+        if (uploadState && uploadState.eventSource) {
             uploadState.eventSource.close();
         }
         activeUploads.delete(videoPath);
@@ -501,6 +607,16 @@ async function uploadVideo(videoPath, studentGroup, date) {
             updateUploadButton(videoPath, progress);
 
             console.log(`📊 Upload progress: ${progress.percent}% (${Math.round(progress.bytesUploaded / (1024 * 1024))} MB / ${Math.round(progress.bytesTotal / (1024 * 1024))} MB)`);
+
+            // If paused by user or error (network disconnect), clean up and show as interrupted
+            if (progress.status === 'paused' || progress.status === 'error') {
+                const statusMsg = progress.status === 'paused' ? '⏸️  Upload paused' : '❌ Upload error detected';
+                console.log(`${statusMsg} for ${videoPath.split('/').pop()} - will show as interrupted`);
+                eventSource.close();
+                activeUploads.delete(videoPath);
+                // Re-render to show blue play button (interrupted/paused state)
+                renderRecordings();
+            }
         } catch (e) {
             console.error('Error parsing progress data:', e);
         }
@@ -613,6 +729,189 @@ async function uploadVideo(videoPath, studentGroup, date) {
         videoPath: videoPath,
         studentGroup: studentGroup,
         date: date,
+        uploadId: uploadId
+    }));
+}
+
+// Resume interrupted upload
+async function resumeUpload(videoPath, studentGroup, date) {
+    const filename = videoPath.split('/').pop();
+    const interrupted = interruptedUploads[videoPath];
+
+    if (!interrupted) {
+        alert('No interrupted upload found for this video');
+        return;
+    }
+
+    const percent = Math.round((interrupted.bytesUploaded / interrupted.bytesTotal) * 100);
+
+    if (!confirm(`Resume upload of ${filename} from ${percent}%?`)) {
+        return;
+    }
+
+    console.log(`▶️ Resuming upload: ${filename} from ${percent}%`);
+
+    // Generate unique upload ID for progress tracking
+    const uploadId = `resume_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Use XMLHttpRequest for upload
+    const xhr = new XMLHttpRequest();
+    xhr.timeout = 3600000; // 1 hour timeout for large uploads
+
+    // Create upload state object
+    const uploadState = {
+        xhr: xhr,
+        eventSource: null,
+        progress: {
+            percent: percent,
+            bytesUploaded: interrupted.bytesUploaded,
+            bytesTotal: interrupted.bytesTotal,
+            status: 'uploading'
+        }
+    };
+    activeUploads.set(videoPath, uploadState);
+
+    // Remove from interrupted uploads list
+    delete interruptedUploads[videoPath];
+
+    // Connect to SSE endpoint for real-time progress
+    const eventSource = new EventSource(`/api/upload-progress/${uploadId}`);
+    uploadState.eventSource = eventSource;
+
+    eventSource.onmessage = (event) => {
+        try {
+            const progress = JSON.parse(event.data);
+            uploadState.progress = progress;
+
+            // Directly update the button without re-rendering the entire table
+            updateUploadButton(videoPath, progress);
+
+            console.log(`📊 Resume progress: ${progress.percent}% (${Math.round(progress.bytesUploaded / (1024 * 1024))} MB / ${Math.round(progress.bytesTotal / (1024 * 1024))} MB)`);
+
+            // If paused by user or error (network disconnect), clean up and show as interrupted
+            if (progress.status === 'paused' || progress.status === 'error') {
+                const statusMsg = progress.status === 'paused' ? '⏸️  Resume paused' : '❌ Resume error detected';
+                console.log(`${statusMsg} for ${videoPath.split('/').pop()} - will show as interrupted`);
+                eventSource.close();
+                activeUploads.delete(videoPath);
+                // Re-render to show blue play button (interrupted/paused state)
+                renderRecordings();
+            }
+        } catch (e) {
+            console.error('Error parsing progress data:', e);
+        }
+    };
+
+    eventSource.onerror = (error) => {
+        console.error('SSE connection error:', error);
+        // Don't close or delete - upload might still be in progress
+    };
+
+    // Re-render to show progress indicator
+    renderRecordings();
+
+    // Handle completion
+    xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+            const result = JSON.parse(xhr.responseText);
+            if (result.success) {
+                console.log(`✅ Resume upload complete: ${filename}`);
+                if (uploadState.eventSource) {
+                    uploadState.eventSource.close();
+                }
+                activeUploads.delete(videoPath);
+                loadData();
+            } else {
+                // Check if session expired - don't restore interrupted upload
+                if (result.sessionExpired) {
+                    const driveMsg = result.driveError ? `\n\nGoogle Drive says: ${result.driveError}` : '';
+                    alert(`Upload session expired. Google Drive resumable sessions expire after ~7 days.\n\nPlease start a new upload.${driveMsg}`);
+                    console.log(`❌ Session expired for ${filename} - removing from interrupted uploads`);
+                    console.log(`   Google Drive error: ${result.driveError}`);
+                    if (uploadState.eventSource) {
+                        uploadState.eventSource.close();
+                    }
+                    activeUploads.delete(videoPath);
+                    // Don't restore - session is gone, show green button
+                    renderRecordings();
+                } else {
+                    alert('Failed to resume upload: ' + result.error);
+                    if (uploadState.eventSource) {
+                        uploadState.eventSource.close();
+                    }
+                    activeUploads.delete(videoPath);
+                    // Restore to interrupted uploads
+                    interruptedUploads[videoPath] = interrupted;
+                    renderRecordings();
+                }
+            }
+        } else if (xhr.status === 410) {
+            // 410 Gone = session expired
+            const result = JSON.parse(xhr.responseText);
+            const driveMsg = result.driveError ? `\n\nGoogle Drive says: ${result.driveError}` : '';
+            alert(`Upload session expired. Google Drive resumable sessions expire after ~7 days.\n\nPlease start a new upload.${driveMsg}`);
+            console.log(`❌ Session expired (410) for ${filename} - removing from interrupted uploads`);
+            console.log(`   Google Drive error: ${result.driveError}`);
+            if (uploadState.eventSource) {
+                uploadState.eventSource.close();
+            }
+            activeUploads.delete(videoPath);
+            // Don't restore - session is gone, show green button
+            renderRecordings();
+        } else {
+            alert('Resume upload failed (Error ' + xhr.status + ')');
+            if (uploadState.eventSource) {
+                uploadState.eventSource.close();
+            }
+            activeUploads.delete(videoPath);
+            // Restore to interrupted uploads
+            interruptedUploads[videoPath] = interrupted;
+            renderRecordings();
+        }
+    });
+
+    // Handle errors
+    xhr.addEventListener('error', () => {
+        alert('Failed to resume upload');
+        if (uploadState.eventSource) {
+            uploadState.eventSource.close();
+        }
+        activeUploads.delete(videoPath);
+        // Restore to interrupted uploads
+        interruptedUploads[videoPath] = interrupted;
+        renderRecordings();
+    });
+
+    // Handle abort
+    xhr.addEventListener('abort', () => {
+        console.log('❌ Resume upload cancelled');
+        if (uploadState.eventSource) {
+            uploadState.eventSource.close();
+        }
+        activeUploads.delete(videoPath);
+        // Restore to interrupted uploads
+        interruptedUploads[videoPath] = interrupted;
+        renderRecordings();
+    });
+
+    // Handle timeout
+    xhr.addEventListener('timeout', () => {
+        console.error('⏱️ Resume upload timeout after 1 hour');
+        alert('Upload timeout after 1 hour - connection may be too slow or unstable.\n\nTry uploading manually to Google Drive.');
+        if (uploadState.eventSource) {
+            uploadState.eventSource.close();
+        }
+        activeUploads.delete(videoPath);
+        // Restore to interrupted uploads
+        interruptedUploads[videoPath] = interrupted;
+        renderRecordings();
+    });
+
+    // Send request with uploadId
+    xhr.open('POST', '/api/resume-upload');
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify({
+        videoPath: videoPath,
         uploadId: uploadId
     }));
 }

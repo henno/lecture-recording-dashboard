@@ -14,6 +14,7 @@ const PORT = 3000;
 interface UploadProgress {
   uploadId: string;
   filename: string;
+  videoPath: string;
   bytesUploaded: number;
   bytesTotal: number;
   percent: number;
@@ -22,6 +23,230 @@ interface UploadProgress {
 
 const uploadProgress = new Map<string, UploadProgress>();
 const progressListeners = new Map<string, Set<(data: string) => void>>();
+const cancelledUploads = new Set<string>(); // Track cancelled upload IDs
+const uploadAbortControllers = new Map<string, AbortController>(); // Track AbortControllers for cancellation
+
+// Interrupted upload state (persistent)
+interface InterruptedUpload {
+  videoPath: string;
+  uploadSessionUrl: string;
+  bytesUploaded: number;
+  bytesTotal: number;
+  studentGroup: string;
+  date: string;
+  interruptedAt: string;
+}
+
+// Load interrupted uploads from disk
+function loadInterruptedUploads(): Record<string, InterruptedUpload> {
+  try {
+    const data = loadJSON('active-uploads.json');
+    return data || {};
+  } catch (error) {
+    return {};
+  }
+}
+
+// Save interrupted upload state
+function saveInterruptedUpload(videoPath: string, state: InterruptedUpload) {
+  const uploads = loadInterruptedUploads();
+  uploads[videoPath] = state;
+  Bun.write('active-uploads.json', JSON.stringify(uploads, null, 2));
+}
+
+// Remove interrupted upload (completed or cancelled)
+function removeInterruptedUpload(videoPath: string) {
+  const uploads = loadInterruptedUploads();
+  delete uploads[videoPath];
+  Bun.write('active-uploads.json', JSON.stringify(uploads, null, 2));
+}
+
+// Background upload function that continues independently of HTTP request
+async function performBackgroundUpload(
+  videoPath: string,
+  uploadUrl: string,
+  totalBytes: number,
+  uploadId: string,
+  studentGroup: string,
+  date: string,
+  uploadFilename: string,
+  startFromByte: number = 0  // Add optional parameter for resume
+) {
+  const filename = videoPath.split('/').pop() || '';
+
+  // Create AbortController for this upload
+  const abortController = new AbortController();
+  uploadAbortControllers.set(uploadId, abortController);
+
+  try {
+    // Step 2: Upload file in chunks with progress tracking
+    const CHUNK_SIZE = 256 * 1024; // 256KB chunks
+    const fileHandle = await Bun.file(videoPath);
+    const fileBuffer = await fileHandle.arrayBuffer();
+
+    let bytesUploaded = startFromByte;
+    let lastEmittedPercent = -1;
+    let lastEmitTime = 0;
+    const EMIT_INTERVAL_MS = 1000;
+
+    console.log(`🔄 Background upload loop starting for ${filename}...`);
+
+    // Upload in chunks
+    while (bytesUploaded < totalBytes) {
+      // Check if upload was paused by user
+      if (cancelledUploads.has(uploadId)) {
+        console.log(`⏸️  Upload paused by user: ${filename}`);
+        cancelledUploads.delete(uploadId);
+        uploadAbortControllers.delete(uploadId);
+
+        // Mark as paused (keeps resume data, different from network error)
+        const progress = uploadProgress.get(uploadId);
+        if (progress) {
+          progress.status = 'paused';
+          uploadProgress.set(uploadId, progress);
+          emitProgress(uploadId);
+        }
+
+        // Clean up
+        setTimeout(() => {
+          uploadProgress.delete(uploadId);
+          progressListeners.delete(uploadId);
+        }, 2000);
+
+        return;
+      }
+
+      const start = bytesUploaded;
+      const end = Math.min(start + CHUNK_SIZE, totalBytes);
+      const chunk = fileBuffer.slice(start, end);
+
+      // Add 10-second timeout for network detection
+      const timeoutId = setTimeout(() => abortController.abort(), 10000);
+
+      try {
+        const chunkResponse = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'Content-Length': String(chunk.byteLength),
+            'Content-Range': `bytes ${start}-${end - 1}/${totalBytes}`
+          },
+          body: chunk,
+          signal: abortController.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        bytesUploaded = end;
+        const percent = Math.round((bytesUploaded / totalBytes) * 100);
+
+        const now = Date.now();
+        const timeSinceLastEmit = now - lastEmitTime;
+
+        // Emit progress updates (throttled)
+        if (percent !== lastEmittedPercent && timeSinceLastEmit >= EMIT_INTERVAL_MS) {
+          const progress = uploadProgress.get(uploadId);
+          if (progress) {
+            progress.bytesUploaded = bytesUploaded;
+            progress.percent = percent;
+            uploadProgress.set(uploadId, progress);
+            emitProgress(uploadId);
+            lastEmittedPercent = percent;
+            lastEmitTime = now;
+          }
+
+          // Update interrupted upload state on disk (for resume capability)
+          console.log(`💾 Progress ${percent}%: Updating state on disk (${Math.round(bytesUploaded / (1024 * 1024))} MB / ${Math.round(totalBytes / (1024 * 1024))} MB)`);
+          saveInterruptedUpload(videoPath, {
+            videoPath,
+            uploadSessionUrl: uploadUrl,
+            bytesUploaded,
+            bytesTotal: totalBytes,
+            studentGroup,
+            date,
+            interruptedAt: new Date().toISOString()
+          });
+        }
+
+        // Check if upload is complete
+        if (chunkResponse.status === 200 || chunkResponse.status === 201) {
+          const file = await chunkResponse.json();
+          console.log(`✅ Upload complete! File ID: ${file.id}`);
+
+          // Ensure final 100% is emitted
+          const progress = uploadProgress.get(uploadId);
+          if (progress) {
+            progress.status = 'complete';
+            progress.bytesUploaded = totalBytes;
+            progress.percent = 100;
+            uploadProgress.set(uploadId, progress);
+            emitProgress(uploadId);
+
+            // Clean up after a delay
+            setTimeout(() => {
+              uploadProgress.delete(uploadId);
+              progressListeners.delete(uploadId);
+              uploadAbortControllers.delete(uploadId);
+            }, 5000);
+          }
+
+          // Remove from interrupted uploads (no longer needs resume)
+          console.log(`🗑️  Removing from active-uploads.json (upload complete)`);
+          removeInterruptedUpload(videoPath);
+          uploadAbortControllers.delete(uploadId);
+
+          // Update lecture_recordings.json to mark as uploaded
+          const recordings = loadJSON('lecture_recordings.json') || [];
+          const recording = recordings.find((r: any) => r.date === date && r.studentGroup === studentGroup);
+          if (recording) {
+            recording.uploaded = true;
+          }
+          Bun.write('lecture_recordings.json', JSON.stringify(recordings, null, 2));
+
+          // Sync with Drive to update drive-files.json
+          await execAsync('bun run sync-google-drive.ts');
+
+          return;
+        }
+      } catch (chunkError: any) {
+        clearTimeout(timeoutId);
+
+        // Check if this was an abort (either timeout or user cancel)
+        if (chunkError.name === 'AbortError' || abortController.signal.aborted) {
+          // Don't throw - let the outer loop check cancellation status
+          console.log(`⏸️  Chunk upload aborted (timeout or cancel)`);
+        } else {
+          // Re-throw other errors
+          throw chunkError;
+        }
+      }
+    }
+
+    throw new Error('Upload completed but no success response received');
+  } catch (error: any) {
+    console.error(`❌ Background upload error for ${filename}:`, error);
+    console.error(`   Error type: ${error.code || error.name}`);
+    console.error(`   Error message: ${error.message}`);
+    console.log(`💾 State preserved in active-uploads.json for resume`);
+
+    // Mark as error
+    const progress = uploadProgress.get(uploadId);
+    if (progress) {
+      progress.status = 'error';
+      uploadProgress.set(uploadId, progress);
+      emitProgress(uploadId);
+
+      // Clean up after a delay
+      setTimeout(() => {
+        uploadProgress.delete(uploadId);
+        progressListeners.delete(uploadId);
+        uploadAbortControllers.delete(uploadId);
+      }, 2000);
+    }
+
+    // Clean up abort controller
+    uploadAbortControllers.delete(uploadId);
+  }
+}
 
 // Load data files
 function loadJSON(filename: string) {
@@ -720,6 +945,242 @@ async function handleRequest(req: Request): Promise<Response> {
     return new Response(responseData, { headers });
   }
 
+  // API: Get interrupted uploads
+  if (path === '/api/interrupted-uploads' && req.method === 'GET') {
+    const interrupted = loadInterruptedUploads();
+    const count = Object.keys(interrupted).length;
+    if (count > 0) {
+      console.log(`📋 Client requested interrupted uploads: ${count} found`);
+      Object.entries(interrupted).forEach(([path, state]: [string, any]) => {
+        const filename = path.split('/').pop();
+        const percent = Math.round((state.bytesUploaded / state.bytesTotal) * 100);
+        console.log(`   - ${filename}: ${percent}% (${Math.round(state.bytesUploaded / (1024 * 1024))} MB / ${Math.round(state.bytesTotal / (1024 * 1024))} MB)`);
+      });
+    }
+    return new Response(JSON.stringify(interrupted), { headers });
+  }
+
+  // API: Get active uploads (currently in progress)
+  if (path === '/api/active-uploads' && req.method === 'GET') {
+    const active: Record<string, any> = {};
+
+    // Convert Map to object for JSON serialization
+    // We need to map uploadId back to videoPath - we'll scan through active uploads
+    for (const [uploadId, progress] of uploadProgress.entries()) {
+      // The uploadId contains the timestamp and random string, but we need the videoPath
+      // We'll have to store videoPath in the progress object
+      if (progress.videoPath) {
+        active[progress.videoPath] = {
+          percent: progress.percent,
+          bytesUploaded: progress.bytesUploaded,
+          bytesTotal: progress.bytesTotal,
+          status: progress.status,
+          uploadId: uploadId
+        };
+      }
+    }
+
+    const count = Object.keys(active).length;
+    if (count > 0) {
+      console.log(`🚀 Client requested active uploads: ${count} in progress`);
+      Object.entries(active).forEach(([path, state]: [string, any]) => {
+        const filename = path.split('/').pop();
+        console.log(`   - ${filename}: ${state.percent}% (${Math.round(state.bytesUploaded / (1024 * 1024))} MB / ${Math.round(state.bytesTotal / (1024 * 1024))} MB)`);
+      });
+    }
+
+    return new Response(JSON.stringify(active), { headers });
+  }
+
+  // API: Resume interrupted upload
+  if (path === '/api/resume-upload' && req.method === 'POST') {
+    try {
+      const body = await req.json();
+      const { videoPath, uploadId } = body;
+
+      const finalUploadId = uploadId || `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      if (!videoPath) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Missing videoPath'
+        }), { headers, status: 400 });
+      }
+
+      // Load interrupted upload state
+      const interrupted = loadInterruptedUploads();
+      const uploadState = interrupted[videoPath];
+
+      if (!uploadState) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'No interrupted upload found for this video'
+        }), { headers, status: 404 });
+      }
+
+      const filename = videoPath.split('/').pop() || '';
+      console.log(`▶️  RESUME REQUEST: ${filename}`);
+      console.log(`   📁 Video: ${videoPath}`);
+      console.log(`   📊 Saved state: ${Math.round(uploadState.bytesUploaded / (1024 * 1024))} MB / ${Math.round(uploadState.bytesTotal / (1024 * 1024))} MB (${Math.round((uploadState.bytesUploaded / uploadState.bytesTotal) * 100)}%)`);
+      console.log(`   🔗 Session URL: ${uploadState.uploadSessionUrl.substring(0, 80)}...`);
+      console.log(`   ⏰ Interrupted at: ${uploadState.interruptedAt}`);
+
+      // Import Google Drive auth functionality
+      const { google } = await import('googleapis');
+
+      // Load credentials and token
+      if (!existsSync('credentials.json') || !existsSync('token.json')) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Google Drive not configured. Please run sync first.'
+        }), { headers, status: 400 });
+      }
+
+      const credentials = JSON.parse(readFileSync('credentials.json', 'utf-8'));
+      const token = JSON.parse(readFileSync('token.json', 'utf-8'));
+
+      const { client_secret, client_id, redirect_uris } = credentials.installed;
+      const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+      oAuth2Client.setCredentials(token);
+
+      // Get access token
+      const accessToken = await oAuth2Client.getAccessToken();
+      if (!accessToken.token) {
+        throw new Error('Failed to get access token');
+      }
+
+      const { uploadSessionUrl, bytesUploaded: startBytes, bytesTotal, studentGroup, date } = uploadState;
+      const uploadFilename = `${studentGroup} - ${date}.mp4`;
+
+      // Initialize progress tracking
+      uploadProgress.set(finalUploadId, {
+        uploadId: finalUploadId,
+        filename,
+        videoPath,
+        bytesUploaded: startBytes,
+        bytesTotal,
+        percent: Math.round((startBytes / bytesTotal) * 100),
+        status: 'uploading'
+      });
+      emitProgress(finalUploadId);
+
+      console.log(`🔍 Querying Google Drive for actual upload status...`);
+      // Query Google Drive for actual upload status
+      const statusResponse = await fetch(uploadSessionUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${accessToken.token}`,
+          'Content-Length': '0',
+          'Content-Range': `bytes */${bytesTotal}`
+        }
+      });
+
+      // Check if session expired (404 Not Found or 410 Gone)
+      if (statusResponse.status === 404 || statusResponse.status === 410) {
+        console.log(`   ❌ Status: ${statusResponse.status} - Upload session expired`);
+
+        // Try to get Google Drive's error message
+        let driveErrorMessage = '';
+        try {
+          const errorBody = await statusResponse.text();
+          console.log(`   📋 Google Drive response: ${errorBody}`);
+          const errorJson = JSON.parse(errorBody);
+          driveErrorMessage = errorJson.error?.message || errorBody;
+        } catch (e) {
+          driveErrorMessage = statusResponse.statusText || 'No error details available';
+        }
+
+        console.log(`   🗑️  Removing expired session from active-uploads.json`);
+        removeInterruptedUpload(videoPath);
+
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Upload session expired. Google Drive resumable upload sessions expire after ~7 days. Please start a new upload.',
+          driveError: driveErrorMessage,
+          sessionExpired: true
+        }), { headers, status: 410 });
+      }
+
+      let actualBytesUploaded = startBytes;
+
+      // Check Range header to see how much Google received
+      if (statusResponse.status === 308) {
+        console.log(`   Status: 308 Resume Incomplete`);
+        const rangeHeader = statusResponse.headers.get('Range');
+        console.log(`   Range header: ${rangeHeader || 'none'}`);
+        if (rangeHeader) {
+          const match = rangeHeader.match(/bytes=0-(\d+)/);
+          if (match) {
+            actualBytesUploaded = parseInt(match[1]) + 1;
+            console.log(`   ✅ Google Drive confirmed: ${Math.round(actualBytesUploaded / (1024 * 1024))} MB received`);
+            console.log(`   📤 Resuming upload from byte ${actualBytesUploaded}`);
+          }
+        } else {
+          console.log(`   ⚠️  No Range header, starting from saved position: ${Math.round(startBytes / (1024 * 1024))} MB`);
+        }
+      } else if (statusResponse.status === 200 || statusResponse.status === 201) {
+        // Upload already complete!
+        const file = await statusResponse.json();
+        console.log(`   Status: ${statusResponse.status} - Upload already complete!`);
+        console.log(`   ✅ File ID: ${file.id}`);
+        console.log(`   🗑️  Removing from active-uploads.json`);
+        removeInterruptedUpload(videoPath);
+
+        const progress = uploadProgress.get(finalUploadId);
+        if (progress) {
+          progress.status = 'complete';
+          progress.percent = 100;
+          uploadProgress.set(finalUploadId, progress);
+          emitProgress(finalUploadId);
+        }
+
+        return new Response(JSON.stringify({
+          success: true,
+          fileId: file.id,
+          fileName: uploadFilename,
+          alreadyComplete: true
+        }), { headers });
+      }
+
+      // Start background upload from where we left off
+      console.log(`📤 Starting background resume from byte ${actualBytesUploaded}...`);
+      performBackgroundUpload(
+        videoPath,
+        uploadSessionUrl,
+        bytesTotal,
+        finalUploadId,
+        studentGroup,
+        date,
+        uploadFilename,
+        actualBytesUploaded  // Resume from this position
+      ).catch((err) => {
+        console.error(`❌ Background resume error for ${filename}:`, err);
+      });
+
+      // Return immediately - upload continues in background
+      return new Response(JSON.stringify({
+        success: true,
+        uploadId: finalUploadId,
+        message: 'Resume started in background',
+        resumedFrom: actualBytesUploaded
+      }), { headers });
+    } catch (resumeError: any) {
+      const isCancelled = resumeError.message === 'Upload cancelled by client';
+
+      if (isCancelled) {
+        console.log(`❌ Resume cancelled`);
+      } else {
+        console.error('Resume error:', resumeError);
+      }
+
+      return new Response(JSON.stringify({
+        success: false,
+        error: resumeError.message,
+        cancelled: isCancelled
+      }), { headers, status: isCancelled ? 499 : 500 });
+    }
+  }
+
   // API: Sync with Google Drive
   if (path === '/api/sync' && req.method === 'POST') {
     try {
@@ -1094,6 +1555,7 @@ async function handleRequest(req: Request): Promise<Response> {
       uploadProgress.set(finalUploadId, {
         uploadId: finalUploadId,
         filename,
+        videoPath,
         bytesUploaded: 0,
         bytesTotal: totalBytes,
         percent: 0,
@@ -1130,128 +1592,93 @@ async function handleRequest(req: Request): Promise<Response> {
         throw new Error('Failed to get upload URL');
       }
 
-      console.log(`📍 Got upload session URL, starting chunked upload...`);
+      console.log(`📍 Got upload session URL, starting background upload...`);
+      console.log(`💾 Saving initial upload state to active-uploads.json (0 bytes uploaded)`);
 
-      // Step 2: Upload file in chunks with progress tracking
-      const CHUNK_SIZE = 256 * 1024; // 256KB chunks
-      const fileHandle = await Bun.file(videoPath);
-      const fileBuffer = await fileHandle.arrayBuffer();
+      // Save interrupted upload state (persistent across restarts)
+      saveInterruptedUpload(videoPath, {
+        videoPath,
+        uploadSessionUrl: uploadUrl,
+        bytesUploaded: 0,
+        bytesTotal: totalBytes,
+        studentGroup,
+        date,
+        interruptedAt: new Date().toISOString()
+      });
+      console.log(`✅ Initial state saved to disk`);
 
-      let bytesUploaded = 0;
-      let lastEmittedPercent = -1;
-      let lastEmitTime = 0;
-      const EMIT_INTERVAL_MS = 1000;
+      // Start upload in background (don't await - return immediately)
+      performBackgroundUpload(videoPath, uploadUrl, totalBytes, finalUploadId, studentGroup, date, uploadFilename).catch((err) => {
+        console.error(`❌ Background upload error for ${filename}:`, err);
+      });
 
-      // Upload in chunks
-      while (bytesUploaded < totalBytes) {
-        // Check if client cancelled the request
-        if (req.signal?.aborted) {
-          console.log(`🛑 Upload cancelled by client for ${filename}`);
-          throw new Error('Upload cancelled by client');
-        }
+      // Return immediately - upload continues in background
+      return new Response(JSON.stringify({
+        success: true,
+        uploadId: finalUploadId,
+        message: 'Upload started in background'
+      }), { headers });
 
-        const start = bytesUploaded;
-        const end = Math.min(start + CHUNK_SIZE, totalBytes);
-        const chunk = fileBuffer.slice(start, end);
-
-        const chunkResponse = await fetch(uploadUrl, {
-          method: 'PUT',
-          headers: {
-            'Content-Length': String(chunk.byteLength),
-            'Content-Range': `bytes ${start}-${end - 1}/${totalBytes}`
-          },
-          body: chunk
-        });
-
-        bytesUploaded = end;
-        const percent = Math.round((bytesUploaded / totalBytes) * 100);
-
-        const now = Date.now();
-        const timeSinceLastEmit = now - lastEmitTime;
-
-        // Emit progress updates (throttled)
-        if (percent !== lastEmittedPercent && timeSinceLastEmit >= EMIT_INTERVAL_MS) {
-          const progress = uploadProgress.get(finalUploadId);
-          if (progress) {
-            progress.bytesUploaded = bytesUploaded;
-            progress.percent = percent;
-            uploadProgress.set(finalUploadId, progress);
-            emitProgress(finalUploadId);
-            lastEmittedPercent = percent;
-            lastEmitTime = now;
-          }
-        }
-
-        // Check if upload is complete
-        if (chunkResponse.status === 200 || chunkResponse.status === 201) {
-          const file = await chunkResponse.json();
-          console.log(`✅ Upload complete! File ID: ${file.id}`);
-
-          // Ensure final 100% is emitted
-          const progress = uploadProgress.get(finalUploadId);
-          if (progress) {
-            progress.status = 'complete';
-            progress.bytesUploaded = totalBytes;
-            progress.percent = 100;
-            uploadProgress.set(finalUploadId, progress);
-            emitProgress(finalUploadId);
-
-            // Clean up after a delay
-            setTimeout(() => {
-              uploadProgress.delete(finalUploadId);
-              progressListeners.delete(finalUploadId);
-            }, 5000);
-          }
-
-          // Update lecture_recordings.json to mark as uploaded
-          const recordings = loadJSON('lecture_recordings.json') || [];
-          const recording = recordings.find((r: any) => r.date === date && r.studentGroup === studentGroup);
-          if (recording) {
-            recording.uploaded = true;
-          }
-          Bun.write('lecture_recordings.json', JSON.stringify(recordings, null, 2));
-
-          // Sync with Drive to update drive-files.json
-          await execAsync('bun run sync-google-drive.ts');
-
-          return new Response(JSON.stringify({
-            success: true,
-            fileId: file.id,
-            fileName: uploadFilename
-          }), { headers });
-        }
-      }
-
-      throw new Error('Upload completed but no success response received');
-    } catch (uploadError: any) {
-      const isCancelled = uploadError.message === 'Upload cancelled by client';
-
-      if (isCancelled) {
-        console.log(`❌ Upload cancelled: ${filename}`);
-      } else {
-        console.error('Direct upload error:', uploadError);
-      }
-
-      // Mark as error or cancelled
-      const progress = uploadProgress.get(finalUploadId);
-      if (progress) {
-        progress.status = isCancelled ? 'error' : 'error';
-        uploadProgress.set(finalUploadId, progress);
-        emitProgress(finalUploadId);
-
-        // Clean up after a delay
-        setTimeout(() => {
-          uploadProgress.delete(finalUploadId);
-          progressListeners.delete(finalUploadId);
-        }, 2000);
-      }
-
-      // Return error response instead of rethrowing
+    } catch (error: any) {
+      console.error('❌ Upload initialization error:', error);
       return new Response(JSON.stringify({
         success: false,
-        error: uploadError.message,
-        cancelled: isCancelled
-      }), { headers, status: isCancelled ? 499 : 500 });
+        error: error.message
+      }), { headers, status: 500 });
+    }
+  }
+
+  // API: Cancel upload
+  if (path === '/api/pause-upload' && req.method === 'POST') {
+    try {
+      const body = await req.json();
+      const { videoPath } = body;
+
+      if (!videoPath) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Missing videoPath parameter'
+        }), { headers, status: 400 });
+      }
+
+      // Find the upload ID for this video path
+      let uploadId: string | null = null;
+      for (const [id, progress] of uploadProgress.entries()) {
+        if (progress.videoPath === videoPath) {
+          uploadId = id;
+          break;
+        }
+      }
+
+      if (!uploadId) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'No active upload found for this video'
+        }), { headers, status: 404 });
+      }
+
+      // Mark upload as paused and abort the in-flight request
+      cancelledUploads.add(uploadId);
+      const abortController = uploadAbortControllers.get(uploadId);
+      if (abortController) {
+        abortController.abort();
+      }
+      console.log(`⏸️  Upload pause requested for: ${videoPath.split('/').pop()}`);
+
+      // Keep in interrupted uploads (can be resumed)
+      // Note: The background upload will save state to active-uploads.json
+
+      return new Response(JSON.stringify({
+        success: true,
+        message: 'Upload paused'
+      }), { headers });
+
+    } catch (error: any) {
+      console.error('❌ Cancel upload error:', error);
+      return new Response(JSON.stringify({
+        success: false,
+        error: error.message
+      }), { headers, status: 500 });
     }
   }
 
