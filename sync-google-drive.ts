@@ -151,7 +151,6 @@ async function main() {
     });
 
     console.log('\n✅ Sync complete!');
-    console.log('\n💡 Run "bun run upload-status-report.ts" to see the updated status.');
 
   } catch (error) {
     console.error('❌ Error:', error);
