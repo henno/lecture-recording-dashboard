@@ -462,7 +462,7 @@ async function uploadVideo(videoPath, studentGroup, date) {
 
     const filename = videoPath.split('/').pop();
 
-    if (!confirm(`Upload ${filename} to Google Drive?\n\nNote: Large files may take 5-10 minutes to upload.\nYou'll see real-time progress percentage.`)) {
+    if (!confirm(`Upload ${filename} to Google Drive?\n\nNote: Large files may take up to 30 minutes to upload depending on connection speed.\nYou'll see real-time progress percentage.`)) {
         return;
     }
 
@@ -473,7 +473,7 @@ async function uploadVideo(videoPath, studentGroup, date) {
 
     // Use XMLHttpRequest for upload
     const xhr = new XMLHttpRequest();
-    xhr.timeout = 600000; // 10 minute timeout for large uploads
+    xhr.timeout = 3600000; // 1 hour timeout for large uploads (no timeout in practice)
 
     // Create upload state object
     const uploadState = {
@@ -597,8 +597,8 @@ async function uploadVideo(videoPath, studentGroup, date) {
 
     // Handle timeout
     xhr.addEventListener('timeout', () => {
-        console.error('⏱️ Upload timeout after 10 minutes');
-        alert('Upload timeout - file may be too large or connection too slow.\n\nTry uploading manually to Google Drive.');
+        console.error('⏱️ Upload timeout after 1 hour');
+        alert('Upload timeout after 1 hour - connection may be too slow or unstable.\n\nTry uploading manually to Google Drive.');
         if (uploadState.eventSource) {
             uploadState.eventSource.close();
         }
