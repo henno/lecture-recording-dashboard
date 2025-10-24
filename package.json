@@ -1,6 +1,9 @@
 {
   "scripts": {
-    "dev": "bun --watch index.ts"
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "sync": "bun src/sync-google-drive.ts",
+    "fetch": "bun src/fetch-lesson-times.ts"
   },
   "dependencies": {
     "googleapis": "^162.0.0"

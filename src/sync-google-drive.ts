@@ -139,7 +139,7 @@ async function main() {
     // Run the main fetch script to update lecture_recordings.json
     console.log('\n🔄 Updating lecture recordings status...');
     const { spawn } = await import('child_process');
-    const child = spawn('bun', ['run', 'fetch-lesson-times.ts'], {
+    const child = spawn('bun', ['run', 'fetch'], {
       stdio: 'inherit'
     });
 

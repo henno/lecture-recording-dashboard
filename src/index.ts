@@ -203,7 +203,7 @@ async function performBackgroundUpload(
           Bun.write('data/lecture_recordings.json', JSON.stringify(recordings, null, 2));
 
           // Sync with Drive to update drive-files.json
-          await execAsync('bun run sync-google-drive.ts');
+          await execAsync('bun run sync');
 
           return;
         }
@@ -1184,7 +1184,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Sync with Google Drive
   if (path === '/api/sync' && req.method === 'POST') {
     try {
-      const { stdout, stderr } = await execAsync('bun run sync-google-drive.ts');
+      const { stdout, stderr } = await execAsync('bun run sync');
       return new Response(JSON.stringify({ success: true, output: stdout }), { headers });
     } catch (error: any) {
       return new Response(JSON.stringify({
@@ -1197,7 +1197,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Scan filesystem for new files
   if (path === '/api/scan' && req.method === 'POST') {
     try {
-      const { stdout, stderr } = await execAsync('bun run fetch-lesson-times.ts');
+      const { stdout, stderr } = await execAsync('bun run fetch');
       return new Response(JSON.stringify({ success: true, output: stdout }), { headers });
     } catch (error: any) {
       return new Response(JSON.stringify({
@@ -1336,7 +1336,7 @@ async function handleRequest(req: Request): Promise<Response> {
         unlinkSync(videoPath);
 
         // Refresh lecture_recordings.json
-        await execAsync('bun run fetch-lesson-times.ts');
+        await execAsync('bun run fetch');
 
         // Update cache incrementally (remove the video without full rebuild)
         if (existsSync('data/status-cache.json')) {
@@ -1385,7 +1385,7 @@ async function handleRequest(req: Request): Promise<Response> {
         await execAsync(`rm -rf "${folderPath}"`);
 
         // Refresh lecture_recordings.json
-        await execAsync('bun run fetch-lesson-times.ts');
+        await execAsync('bun run fetch');
 
         // Clear status cache to force rebuild
         if (existsSync('data/status-cache.json')) {
@@ -1445,7 +1445,7 @@ async function handleRequest(req: Request): Promise<Response> {
       await rename(oldPath, newPath);
 
       // Refresh lecture_recordings.json
-      await execAsync('bun run fetch-lesson-times.ts');
+      await execAsync('bun run fetch');
 
       // Update cache incrementally (rename the video without full rebuild)
       if (existsSync('data/status-cache.json')) {
