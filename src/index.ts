@@ -1580,8 +1580,8 @@ async function handleRequest(req: Request): Promise<Response> {
         }), { headers, status: 400 });
       }
 
-      // Prepare upload
-      const uploadFilename = `${studentGroup} - ${date}.mp4`;
+      // Prepare upload - use original filename to preserve suffixes like _01, _02, etc.
+      const uploadFilename = filename;
 
       // Get file size for progress tracking
       const fileStats = statSync(videoPath);
