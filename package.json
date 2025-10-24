@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "dev": "bun --watch index.ts"
+  },
   "dependencies": {
     "googleapis": "^162.0.0"
   }
