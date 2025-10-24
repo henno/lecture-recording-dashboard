@@ -1547,6 +1547,19 @@ async function handleRequest(req: Request): Promise<Response> {
       const filename = videoPath.split('/').pop() || '';
       const uploadFilename = `${studentGroup} - ${date}.mp4`;
 
+      // Validate that the filename matches the student group
+      // Expected formats: "TAK24 - 2025-10-16.mp4" or "TAK24 - 2025-10-16_02.mp4"
+      const filenameStudentGroupMatch = filename.match(/^(TAK24|TAK25|IS24)\s*-/);
+      if (filenameStudentGroupMatch) {
+        const filenameStudentGroup = filenameStudentGroupMatch[1];
+        if (filenameStudentGroup !== studentGroup) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: `Student group mismatch: filename contains "${filenameStudentGroup}" but you're trying to upload to "${studentGroup}" folder. Please check the schedule assignment.`
+          }), { headers, status: 400 });
+        }
+      }
+
       // Get file size for progress tracking
       const fileStats = statSync(videoPath);
       const totalBytes = fileStats.size;
