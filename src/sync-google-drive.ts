@@ -12,7 +12,8 @@ const CREDENTIALS_PATH = 'config/credentials.json';
 // Google Drive folder IDs
 const FOLDERS = {
   TAK24: '1IaLQwslFddy8KhxPUtg67o34pEPETrai',
-  IS24: '1xDunwzOWa1B6xbMQYZRlSuS2Yai_uyAp'
+  IS24: '1xDunwzOWa1B6xbMQYZRlSuS2Yai_uyAp',
+  TAK25: '1njVYojvTuVVkNIpsZP0k3Cz_YHUhdHwg'
 };
 
 /**

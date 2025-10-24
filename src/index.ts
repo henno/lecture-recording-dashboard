@@ -1532,7 +1532,7 @@ async function handleRequest(req: Request): Promise<Response> {
       const FOLDERS: { [key: string]: string } = {
         TAK24: '1IaLQwslFddy8KhxPUtg67o34pEPETrai',
         IS24: '1xDunwzOWa1B6xbMQYZRlSuS2Yai_uyAp',
-        TAK25: '1IaLQwslFddy8KhxPUtg67o34pEPETrai' // Using TAK24 folder for TAK25
+        TAK25: '1njVYojvTuVVkNIpsZP0k3Cz_YHUhdHwg'
       };
 
       const folderId = FOLDERS[studentGroup];
