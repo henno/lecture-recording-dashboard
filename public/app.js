@@ -1,5 +1,6 @@
 let recordings = [];
 let driveFiles = {};
+let studyGroups = {}; // Map of study group names to Google Drive folder IDs
 let interruptedUploads = {}; // Map of videoPath -> InterruptedUpload state
 let filters = {
     missing: true,
@@ -29,6 +30,15 @@ async function loadData(forceRefresh = false) {
 
         recordings = data.recordings;
         driveFiles = data.driveFiles || {};
+
+        // Fetch study groups configuration
+        try {
+            const studyGroupsResponse = await fetch('/api/study-groups');
+            studyGroups = await studyGroupsResponse.json();
+        } catch (e) {
+            console.warn('Failed to load study groups:', e);
+            studyGroups = {};
+        }
 
         // Fetch interrupted uploads
         try {
@@ -262,12 +272,17 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     });
 
     if (gdriveVideos.length > 0) {
+        // Get folder ID for clickable link
+        const folderId = studyGroups[studentGroup];
+        const folderUrl = folderId ? `https://drive.google.com/drive/folders/${folderId}` : '#';
+        const folderClickable = folderId ? `onclick="window.open('${folderUrl}', '_blank')" style="cursor:pointer;" title="Click to open ${studentGroup} folder in Google Drive"` : '';
+
         gdriveVideosHTML = '<div class="video-list">';
         gdriveVideos.forEach(video => {
             gdriveVideosHTML += `
                 <div class="video-item">
                     <div class="input-group">
-                        <span class="input-group-text">📁 ${studentGroup}</span>
+                        <span class="input-group-text" ${folderClickable}>📁 ${studentGroup}</span>
                         <input type="text" readonly class="form-control" value="☁️ ${video.name}" onclick="window.open('${video.url.replace(/'/g, "\\'")}', '_blank')" title="Click to open in Google Drive">
                         <span class="input-group-text" style="${video.highlight}">${video.size}</span>
                     </div>
@@ -1027,14 +1042,30 @@ async function deleteVideo(videoPath) {
     }
 
     // Optimistic update: remove video from UI immediately
+    const folderPath = videoPath.substring(0, videoPath.lastIndexOf('/'));
+    let shouldRemoveFolder = false;
+
     recordings.forEach(rec => {
         if (rec.videosWithStatus) {
             rec.videosWithStatus = rec.videosWithStatus.filter(v => v.path !== videoPath);
+            // Check if this was the last video in the folder
+            if (rec.folder && rec.folder.includes(folderPath.split('/').pop())) {
+                const remainingVideos = rec.videosWithStatus.filter(v => v.path.includes(folderPath));
+                if (remainingVideos.length === 0) {
+                    shouldRemoveFolder = true;
+                }
+            }
         }
         if (rec.videos) {
             rec.videos = rec.videos.filter(v => v !== videoPath);
         }
     });
+
+    // If this was the last video, also remove the recording entry from DOM
+    if (shouldRemoveFolder) {
+        recordings = recordings.filter(rec => !rec.folder || !rec.folder.includes(folderPath.split('/').pop()));
+    }
+
     renderRecordings();
 
     // Call API in background
@@ -1049,8 +1080,15 @@ async function deleteVideo(videoPath) {
             alert('Failed to delete video: ' + result.error);
             // Restore data on error
             loadData();
+        } else if (result.folderError) {
+            // Folder deletion failed - show error and reload
+            alert(`Video deleted successfully, but failed to delete empty folder:\n${result.folderError}`);
+            window.location.reload();
+        } else if (result.folderDeleted) {
+            // Folder was successfully deleted - data already removed from DOM
+            console.log('Video and empty folder deleted successfully');
         }
-        // If success, do nothing - the optimistic update already removed it
+        // If success without folder deletion, do nothing - the optimistic update already removed it
     } catch (error) {
         console.error('Error deleting video:', error);
         alert('Failed to delete video');

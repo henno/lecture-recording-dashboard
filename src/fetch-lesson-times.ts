@@ -34,7 +34,7 @@ async function fetchLessonTimes() {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    const data: ApiResponse = await response.json();
+    const data = await response.json() as ApiResponse;
 
     // Filter out entries with empty studentGroups array (not actual lessons)
     const lessonTimes = data.content

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { serve } from 'bun';
-import { readFileSync, existsSync, unlinkSync, statSync } from 'fs';
+import { readFileSync, existsSync, unlinkSync, statSync, readdirSync, renameSync } from 'fs';
 import { join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -42,7 +42,45 @@ interface UploadProgress {
   bytesUploaded: number;
   bytesTotal: number;
   percent: number;
-  status: 'uploading' | 'complete' | 'error';
+  status: 'uploading' | 'complete' | 'error' | 'paused';
+}
+
+// Request body interfaces
+interface ResumeUploadBody {
+  videoPath: string;
+  uploadId?: string;
+}
+
+interface RenameVideoBody {
+  oldPath: string;
+  newFilename: string;
+}
+
+interface UploadVideoBody {
+  videoPath: string;
+  date: string;
+  uploadId?: string;
+}
+
+interface PauseUploadBody {
+  videoPath: string;
+}
+
+interface MarkTimeboltedBody {
+  videoPath: string;
+  isTimebolted: boolean;
+}
+
+interface OpenFolderBody {
+  folderPath: string;
+}
+
+// Google Drive API response
+interface GoogleDriveFile {
+  id: string;
+  name?: string;
+  mimeType?: string;
+  [key: string]: any; // Allow other properties
 }
 
 const uploadProgress = new Map<string, UploadProgress>();
@@ -193,7 +231,7 @@ async function performBackgroundUpload(
 
         // Check if upload is complete
         if (chunkResponse.status === 200 || chunkResponse.status === 201) {
-          const file = await chunkResponse.json();
+          const file = await chunkResponse.json() as GoogleDriveFile;
           console.log(`✅ Upload complete! File ID: ${file.id}`);
 
           // Ensure final 100% is emitted
@@ -758,6 +796,19 @@ async function handleRequest(req: Request): Promise<Response> {
     }
   }
 
+  // API: Get study groups configuration
+  if (path === '/api/study-groups' && req.method === 'GET') {
+    try {
+      const studyGroups = loadStudyGroups();
+      return new Response(JSON.stringify(studyGroups), { headers });
+    } catch (error: any) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: error.message
+      }), { headers, status: 500 });
+    }
+  }
+
   // API: Get status
   if (path === '/api/status') {
     const apiStartTime = Date.now();
@@ -1019,7 +1070,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Resume interrupted upload
   if (path === '/api/resume-upload' && req.method === 'POST') {
     try {
-      const body = await req.json();
+      const body = await req.json() as ResumeUploadBody;
       const { videoPath, uploadId } = body;
 
       const finalUploadId = uploadId || `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1144,7 +1195,7 @@ async function handleRequest(req: Request): Promise<Response> {
         }
       } else if (statusResponse.status === 200 || statusResponse.status === 201) {
         // Upload already complete!
-        const file = await statusResponse.json();
+        const file = await statusResponse.json() as GoogleDriveFile;
         console.log(`   Status: ${statusResponse.status} - Upload already complete!`);
         console.log(`   ✅ File ID: ${file.id}`);
         console.log(`   🗑️  Removing from active-uploads.json`);
@@ -1357,7 +1408,33 @@ async function handleRequest(req: Request): Promise<Response> {
 
     try {
       if (existsSync(videoPath)) {
+        const folderPath = videoPath.substring(0, videoPath.lastIndexOf('/'));
+
         unlinkSync(videoPath);
+
+        // Check if folder is now empty (no more videos)
+        let shouldDeleteFolder = false;
+        let folderError = null;
+        try {
+          const remainingFiles = readdirSync(folderPath);
+          const videoFiles = remainingFiles.filter(f =>
+            f.endsWith('.mp4') ||
+            f.endsWith('.mkv') ||
+            f.endsWith('.avi') ||
+            f.endsWith('.mov') ||
+            f.endsWith('.m4v')
+          );
+
+          if (videoFiles.length === 0) {
+            shouldDeleteFolder = true;
+            console.log(`📁 No more videos in ${folderPath}, deleting folder...`);
+            await execAsync(`rm -rf "${folderPath}"`);
+            console.log(`✅ Folder deleted: ${folderPath}`);
+          }
+        } catch (error: any) {
+          console.error(`❌ Error deleting folder: ${error.message}`);
+          folderError = error.message;
+        }
 
         // Refresh lecture_recordings.json
         await execAsync('bun run fetch');
@@ -1384,7 +1461,11 @@ async function handleRequest(req: Request): Promise<Response> {
           }
         }
 
-        return new Response(JSON.stringify({ success: true }), { headers });
+        return new Response(JSON.stringify({
+          success: true,
+          folderDeleted: shouldDeleteFolder,
+          folderError
+        }), { headers });
       } else {
         return new Response(JSON.stringify({
           success: false,
@@ -1434,7 +1515,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Rename video
   if (path === '/api/rename' && req.method === 'POST') {
     try {
-      const body = await req.json();
+      const body = await req.json() as RenameVideoBody;
       const { oldPath, newFilename } = body;
 
       if (!oldPath || !newFilename) {
@@ -1465,8 +1546,7 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       // Rename the file
-      const { rename } = await import('fs/promises');
-      await rename(oldPath, newPath);
+      renameSync(oldPath, newPath);
 
       // Refresh lecture_recordings.json
       await execAsync('bun run fetch');
@@ -1513,7 +1593,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Upload to Google Drive
   if (path === '/api/upload' && req.method === 'POST') {
     try {
-      const body = await req.json();
+      const body = await req.json() as UploadVideoBody;
       const { videoPath, date, uploadId } = body;
 
       // Generate upload ID if not provided
@@ -1667,7 +1747,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Cancel upload
   if (path === '/api/pause-upload' && req.method === 'POST') {
     try {
-      const body = await req.json();
+      const body = await req.json() as PauseUploadBody;
       const { videoPath } = body;
 
       if (!videoPath) {
@@ -1721,7 +1801,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Mark as timebolted
   if (path === '/api/mark-timebolted' && req.method === 'POST') {
     try {
-      const body = await req.json();
+      const body = await req.json() as MarkTimeboltedBody;
       const { videoPath, isTimebolted } = body;
 
       const tracking = loadJSON('data/timebolted-videos.json') || {};
@@ -1741,7 +1821,7 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Open in Finder
   if (path === '/api/open-folder' && req.method === 'POST') {
     try {
-      const body = await req.json();
+      const body = await req.json() as OpenFolderBody;
       const { folderPath } = body;
 
       // Open Finder at the folder location
