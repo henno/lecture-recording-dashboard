@@ -13,7 +13,7 @@ const month = String(futureDate.getMonth() + 1).padStart(2, '0');
 const day = String(futureDate.getDate()).padStart(2, '0');
 const futureDateFormatted = `${year}-${month}-${day}`;
 
-const API_URL = `https://tahveltp.edu.ee/hois_back/timetableevents/timetableSearch?from=2025-09-01T00:00:00.000Z&lang=ET&page=0&schoolId=9&size=2000&teachers=95f992e3-01b9-4f5e-a5b6-d9ed2a159f6e&thru=${futureDateFormatted}T23:59:59.999Z`;
+const API_URL = `https://tahveltp.edu.ee/hois_back/timetableevents/timetableSearch?from=2024-09-26T00:00:00.000Z&lang=ET&page=0&schoolId=9&size=2000&teachers=95f992e3-01b9-4f5e-a5b6-d9ed2a159f6e&thru=${futureDateFormatted}T23:59:59.999Z`;
 
 interface LessonEvent {
   date: string;

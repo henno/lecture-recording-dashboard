@@ -443,17 +443,15 @@ function formatFileSize(bytes: number): string {
 async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp: string, duration: string } | null> {
   const cache = loadTimestampCache();
 
-  // Check cache first using modification time (much faster than MD5)
-  const cachedResult = cache.results[videoPath];
-  const fileMtime = getFileMtime(videoPath);
+  // Compute xxHash3 of first 300 bytes for cache validation
+  const fileHash = await getFileHash(videoPath);
 
-  if (cachedResult && fileMtime && cachedResult.mtime === fileMtime) {
-    // File hasn't changed since cache was created - use cached result
+  // Check cache first using hash (not mtime - files can be copied/moved)
+  const cachedResult = cache.results[videoPath];
+  if (cachedResult && fileHash && cachedResult.hash === fileHash) {
+    // Hash matches - file content unchanged, use cached result
     return cachedResult.timestamp ? { timestamp: cachedResult.timestamp, duration: cachedResult.duration || '' } : null;
   }
-
-  // If cache miss or file changed, compute hash for validation
-  const fileHash = await getFileHash(videoPath);
 
   try {
     const filename = videoPath.split('/').pop() || '';
@@ -623,13 +621,12 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
     }
 
     // Cache the result (even if null, to avoid reprocessing)
-    if (fileHash && fileMtime) {
+    if (fileHash) {
       cache.results[videoPath] = {
         timestamp,
         duration: durationStr,
         extractedAt: new Date().toISOString(),
-        hash: fileHash,
-        mtime: fileMtime
+        hash: fileHash
       };
       saveTimestampCache(cache);
     }
@@ -662,33 +659,30 @@ async function analyzeVideo(videoPath: string) {
   // Load cache
   const cache = loadTimeboltCache();
 
-  // Check cache first using modification time (much faster than MD5)
-  const cachedResult = cache.results[videoPath];
-  const fileMtime = getFileMtime(videoPath);
+  // Compute xxHash3 of first 300 bytes for cache validation
+  const fileHash = await getFileHash(videoPath);
 
-  if (cachedResult && fileMtime && cachedResult.mtime === fileMtime) {
-    // File hasn't changed since cache was created - use cached result
+  // Check cache first using hash (not mtime - files can be copied/moved)
+  const cachedResult = cache.results[videoPath];
+  if (cachedResult && fileHash && cachedResult.hash === fileHash) {
+    // Hash matches - file content unchanged, use cached result
     return {
       isTimebolted: cachedResult.isTimebolted,
       detectionMethod: cachedResult.method + '-cached'
     };
   }
 
-  // If cache miss or file changed, compute hash for validation
-  const fileHash = await getFileHash(videoPath);
-
   // Perform silence analysis
   console.log(`Analyzing video for timebolt: ${filename}`);
   const isTimeboltedBySilence = await detectTimeboltBySilence(videoPath);
 
-  // Update cache with hash and mtime
-  if (fileHash && fileMtime) {
+  // Update cache with hash only
+  if (fileHash) {
     cache.results[videoPath] = {
       isTimebolted: isTimeboltedBySilence,
       analyzedAt: new Date().toISOString(),
       method: 'silence-analysis',
-      hash: fileHash,
-      mtime: fileMtime
+      hash: fileHash
     };
     cache.lastRun = new Date().toISOString();
     saveTimeboltCache(cache);
@@ -814,36 +808,28 @@ async function handleRequest(req: Request): Promise<Response> {
     const apiStartTime = Date.now();
     console.log('\n🔍 API /api/status called');
 
-    // Check if force refresh is requested
-    const urlObj = new URL(req.url);
-    const forceRefresh = urlObj.searchParams.get('refresh') === 'true';
+    // Check status cache first - always use cache if source files haven't changed
+    const statusCache = loadJSON('data/status-cache.json');
+    if (statusCache) {
+      // Validate cache: check if source files have changed
+      const recordingsMtime = getFileMtime('data/lecture_recordings.json');
+      const timesMtime = getFileMtime('data/times_simplified.json');
+      const driveMtime = getFileMtime('data/drive-files.json');
 
-    // Check status cache first (unless force refresh)
-    if (!forceRefresh) {
-      const statusCache = loadJSON('data/status-cache.json');
-      if (statusCache) {
-        // Validate cache: check if source files have changed
-        const recordingsMtime = getFileMtime('data/lecture_recordings.json');
-        const timesMtime = getFileMtime('data/times_simplified.json');
-        const driveMtime = getFileMtime('data/drive-files.json');
-
-        if (statusCache.recordingsMtime === recordingsMtime &&
-            statusCache.timesMtime === timesMtime &&
-            statusCache.driveMtime === driveMtime) {
-          console.log('✅ Using cached status (no file changes detected)');
-          const cacheTime = Date.now() - apiStartTime;
-          console.log(`⚡ Cache response time: ${cacheTime}ms\n`);
-          return new Response(JSON.stringify({
-            recordings: statusCache.recordings,
-            timesSimplified: statusCache.timesSimplified,
-            driveFiles: statusCache.driveFiles
-          }), { headers });
-        } else {
-          console.log('🔄 Cache invalidated (files changed)');
-        }
+      if (statusCache.recordingsMtime === recordingsMtime &&
+          statusCache.timesMtime === timesMtime &&
+          statusCache.driveMtime === driveMtime) {
+        console.log('✅ Using cached status (no file changes detected)');
+        const cacheTime = Date.now() - apiStartTime;
+        console.log(`⚡ Cache response time: ${cacheTime}ms\n`);
+        return new Response(JSON.stringify({
+          recordings: statusCache.recordings,
+          timesSimplified: statusCache.timesSimplified,
+          driveFiles: statusCache.driveFiles
+        }), { headers });
+      } else {
+        console.log('🔄 Source files changed - rebuilding cache with incremental updates');
       }
-    } else {
-      console.log('🔄 Force refresh requested');
     }
 
     const loadStartTime = Date.now();
@@ -876,7 +862,7 @@ async function handleRequest(req: Request): Promise<Response> {
       sum + (rec.videos ? rec.videos.length : 0), 0);
     console.log(`📹 Processing ${totalVideos} videos across ${recordings.length} recordings`);
 
-    // Load previous video metadata cache for MD5 comparison
+    // Load previous video metadata cache for hash comparison
     const previousStatusCache = loadJSON('data/status-cache.json');
     const videoMetadataCache = previousStatusCache?.videoMetadataCache || {};
 

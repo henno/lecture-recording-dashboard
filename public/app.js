@@ -10,7 +10,7 @@ let filters = {
 };
 
 // Load data from API
-async function loadData(forceRefresh = false) {
+async function loadData() {
     const startTime = performance.now();
     console.log('🔄 Starting data load...');
 
@@ -18,8 +18,7 @@ async function loadData(forceRefresh = false) {
 
     try {
         const fetchStart = performance.now();
-        const url = forceRefresh ? '/api/status?refresh=true' : '/api/status';
-        const response = await fetch(url);
+        const response = await fetch('/api/status');
         const fetchEnd = performance.now();
         console.log(`⏱️  API fetch time: ${(fetchEnd - fetchStart).toFixed(0)}ms`);
 
@@ -1190,8 +1189,8 @@ async function refreshData() {
             return;
         }
 
-        // Then reload data with force refresh
-        await loadData(true);
+        // Then reload data (cache will auto-detect the file change)
+        await loadData();
     } catch (error) {
         console.error('Error refreshing:', error);
         alert('Failed to refresh');
