@@ -355,7 +355,16 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
         localVideos.forEach(video => {
           let leftAddon = '';
           if (video.recordingTime) {
-                leftAddon = video.recordingTime;
+                // Extract just the time part from "2025-05-14 09:13"
+                const startTime = video.recordingTime.split(' ')[1] || video.recordingTime;
+                leftAddon = startTime;
+
+                // Add end timestamp if available
+                if (video.endTimestamp) {
+                    leftAddon += `-${video.endTimestamp}`;
+                }
+
+                // Add duration in parentheses
                 if (video.duration) {
                     leftAddon += ` (${video.duration})`;
                 }

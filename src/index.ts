@@ -440,7 +440,7 @@ function formatFileSize(bytes: number): string {
 }
 
 // Extract timestamp and duration from video
-async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp: string, duration: string } | null> {
+async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp: string, duration: string, endTimestamp: string } | null> {
   const cache = loadTimestampCache();
 
   // Compute xxHash3 of first 300 bytes for cache validation
@@ -450,7 +450,11 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
   const cachedResult = cache.results[videoPath];
   if (cachedResult && fileHash && cachedResult.hash === fileHash) {
     // Hash matches - file content unchanged, use cached result
-    return cachedResult.timestamp ? { timestamp: cachedResult.timestamp, duration: cachedResult.duration || '' } : null;
+    return cachedResult.timestamp ? {
+      timestamp: cachedResult.timestamp,
+      duration: cachedResult.duration || '',
+      endTimestamp: cachedResult.endTimestamp || ''
+    } : null;
   }
 
   try {
@@ -592,15 +596,116 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
     const timestamp = validResult?.timestamp || null;
     const successfulFrame = validResult?.frameNum ?? -1;
 
-    console.log(`Final timestamp: ${timestamp} (from frame ${successfulFrame})`);
+    console.log(`Final start timestamp: ${timestamp} (from frame ${successfulFrame})`);
 
-    // Get video duration
+    // Get video duration and extract end timestamp from last frame
     let durationStr = '';
+    let endTimestamp = '';
     if (timestamp) {
       const durationSeconds = await getVideoDuration(videoPath);
       if (durationSeconds) {
         durationStr = formatFuzzyDuration(durationSeconds);
         console.log(`  Duration: ${durationStr} (${durationSeconds.toFixed(0)}s)`);
+
+        // Extract timestamp from last frame (since video might be edited/timebolted)
+        try {
+          // Get total frame count
+          const { stdout: frameCountOutput } = await execAsync(
+            `ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "${videoPath}"`
+          );
+          const totalFrames = parseInt(frameCountOutput.trim());
+
+          if (totalFrames > 15) {
+            // Extract timestamp from last frames (going backwards from end, similar to start strategy)
+            const lastFramesToTry = [
+              totalFrames - 1,   // Last frame
+              totalFrames - 4,   // -3 frames
+              totalFrames - 8,   // -7 frames
+              totalFrames - 11,  // -10 frames
+              totalFrames - 15   // -14 frames
+            ].filter(f => f > 0);
+
+            // Process frames in parallel
+            const endFramePromises = lastFramesToTry.map((frameNum) => {
+              return (async () => {
+                const tempImagePath = join(tempDir, `frame_end_${Date.now()}_${frameNum}.png`);
+
+                try {
+                  await execAsync(
+                    `ffmpeg -i "${videoPath}" -vf "select=eq(n\\,${frameNum}),crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},scale=iw*4:ih*4,unsharp=7:7:2.5,eq=contrast=2:brightness=0.1" -vframes 1 "${tempImagePath}" -y 2>&1`
+                  );
+
+                  const { stdout } = await execAsync(`tesseract "${tempImagePath}" stdout --psm 7`);
+
+                  // Clean OCR output
+                  let cleanedText = stdout.trim()
+                    .replace(/[;,()]/g, '-')
+                    .replace(/[°*]/g, ':')
+                    .replace(/[oOQ]/g, '0')
+                    .replace(/[lI|]/g, '1')
+                    .replace(/[Uu]/g, '0')
+                    .replace(/[Zz]/g, '2')
+                    .replace(/\s+/g, ' ')
+                    .replace(/--+/g, '-')
+                    .replace(/[Ff]/g, '7');
+
+                  console.log(`  End frame ${frameNum} OCR raw: "${stdout.trim()}"`);
+                  console.log(`  End frame ${frameNum} OCR cleaned: "${cleanedText}"`);
+
+                  const timestampMatch = cleanedText.match(/(\d{4}[-]\d{1,2}[-]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})/);
+                  if (timestampMatch) {
+                    const parts = timestampMatch[1].split(/[-\s:]/);
+                    if (parts.length === 6) {
+                      const [year, month, day, hour, minute, second] = parts;
+
+                      // Validate timestamp values
+                      const yearNum = parseInt(year);
+                      const monthNum = parseInt(month);
+                      const dayNum = parseInt(day);
+                      const hourNum = parseInt(hour);
+                      const minuteNum = parseInt(minute);
+                      const secondNum = parseInt(second);
+
+                      if (yearNum >= 2024 && yearNum <= 2026 &&
+                          monthNum >= 1 && monthNum <= 12 &&
+                          dayNum >= 1 && dayNum <= 31 &&
+                          hourNum >= 0 && hourNum <= 23 &&
+                          minuteNum >= 0 && minuteNum <= 59 &&
+                          secondNum >= 0 && secondNum <= 59) {
+                        const endTime = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+                        console.log(`  End frame ${frameNum} ✓ Valid timestamp: ${endTime}`);
+                        return { frameNum, endTime };
+                      } else {
+                        console.log(`  End frame ${frameNum} ✗ Invalid values`);
+                      }
+                    }
+                  } else {
+                    console.log(`  End frame ${frameNum} ✗ No pattern found`);
+                  }
+
+                  // Cleanup temp file
+                  await execAsync(`rm -f "${tempImagePath}"`);
+                  return { frameNum, endTime: null };
+                } catch (e) {
+                  console.error(`  End frame ${frameNum} error:`, e);
+                  return { frameNum, endTime: null };
+                }
+              })();
+            });
+
+            // Wait for all end frames to be processed
+            const endResults = await Promise.all(endFramePromises);
+
+            // Find first valid end timestamp
+            const validEndResult = endResults.find(r => r.endTime !== null);
+            if (validEndResult) {
+              endTimestamp = validEndResult.endTime!;
+              console.log(`  Final end timestamp: ${endTimestamp} (from frame ${validEndResult.frameNum})`);
+            }
+          }
+        } catch (error) {
+          console.log(`  ⚠️ Could not extract end timestamp:`, error);
+        }
       }
     }
 
@@ -625,13 +730,14 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
       cache.results[videoPath] = {
         timestamp,
         duration: durationStr,
+        endTimestamp,
         extractedAt: new Date().toISOString(),
         hash: fileHash
       };
       saveTimestampCache(cache);
     }
 
-    return timestamp ? { timestamp, duration: durationStr } : null;
+    return timestamp ? { timestamp, duration: durationStr, endTimestamp } : null;
   } catch (error) {
     console.error('Timestamp extraction error:', error);
     return null;
@@ -941,6 +1047,7 @@ async function handleRequest(req: Request): Promise<Response> {
                 isTimebolted: analysis.isTimebolted,
                 detectionMethod: analysis.detectionMethod,
                 recordingTime: timestampData?.timestamp || null,
+                endTimestamp: timestampData?.endTimestamp || '',
                 duration: timestampData?.duration || '',
                 fileSize,
                 fileSizeBytes
