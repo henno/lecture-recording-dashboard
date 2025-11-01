@@ -6,7 +6,8 @@ A web-based dashboard for managing Zoom lecture recordings and syncing them to G
 
 - Scans local Zoom recordings and matches with lecture schedules
 - Detects timebolted videos using silence analysis
-- Extracts recording timestamps from video using OCR
+- Extracts start and end timestamps from videos using OCR
+- Displays time ranges (e.g., "10:07-14:05 (3h)") for easy identification
 - Upload recordings to Google Drive with proper naming
 - Track upload status and manage recordings
 - Rename and delete local recordings
@@ -144,7 +145,9 @@ Click the trash icon (🗑️) to delete a video or empty folder.
 │   ├── drive-files.json           # Google Drive files cache
 │   ├── times_simplified.json      # Lesson schedules
 │   ├── active-uploads.json        # Resume state for interrupted uploads
-│   └── *-cache.json               # Various caches for performance
+│   ├── video-metadata-cache.json  # Video metadata and timestamps cache
+│   ├── timestamp-cache.json       # OCR timestamp extraction cache
+│   └── *-cache.json               # Other performance caches
 ├── public/                    # Frontend assets
 │   ├── index.html
 │   ├── app.js
@@ -181,6 +184,8 @@ Click the trash icon (🗑️) to delete a video or empty folder.
 **Timestamp extraction fails**
 - Ensure Tesseract OCR is installed (`brew install tesseract`)
 - Check `debug_frames/` folder for OCR debug images
+- Timebolted videos are fully supported and should extract timestamps correctly
+- If extraction fails, delete `data/video-metadata-cache.json` and `data/timestamp-cache.json` to force re-extraction
 
 **Videos not detected**
 - Run `bun run fetch` to rescan filesystem
