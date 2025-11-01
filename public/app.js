@@ -9,6 +9,55 @@ let filters = {
     group: ''
 };
 
+// Load video metadata progressively (max 2 concurrent requests to avoid CPU overload)
+const MAX_CONCURRENT_REQUESTS = 2;
+const videoMetadataCache = new Map(); // Client-side cache
+
+async function loadVideoMetadata(videoPaths) {
+    console.log(`📹 Loading metadata for ${videoPaths.length} videos...`);
+
+    let completed = 0;
+    const executing = [];
+
+    for (const videoPath of videoPaths) {
+        const promise = (async () => {
+            try {
+                // Check client-side cache first
+                if (videoMetadataCache.has(videoPath)) {
+                    return videoMetadataCache.get(videoPath);
+                }
+
+                const response = await fetch(`/api/video-metadata?path=${encodeURIComponent(videoPath)}`);
+                const metadata = await response.json();
+
+                // Cache on client side
+                videoMetadataCache.set(videoPath, metadata);
+
+                completed++;
+                if (completed % 5 === 0) {
+                    console.log(`   📊 Progress: ${completed}/${videoPaths.length} videos`);
+                }
+
+                return metadata;
+            } catch (error) {
+                console.error(`❌ Failed to load metadata for ${videoPath}:`, error);
+                return null;
+            }
+        })();
+
+        executing.push(promise);
+
+        if (executing.length >= MAX_CONCURRENT_REQUESTS) {
+            await Promise.race(executing.map(p => p.then(() => {
+                executing.splice(executing.indexOf(p), 1);
+            })));
+        }
+    }
+
+    await Promise.all(executing);
+    console.log(`✅ All video metadata loaded`);
+}
+
 // Load data from API
 async function loadData() {
     const startTime = performance.now();
@@ -29,6 +78,28 @@ async function loadData() {
 
         recordings = data.recordings;
         driveFiles = data.driveFiles || {};
+
+        // Collect all video paths for progressive loading
+        const allVideoPaths = [];
+        recordings.forEach(rec => {
+            if (rec.videoPaths && rec.videoPaths.length > 0) {
+                allVideoPaths.push(...rec.videoPaths);
+            }
+        });
+
+        // Note: Don't render yet - wait for all data to load first
+        // We'll render after study groups, interrupted uploads, etc. are loaded
+
+        // Load video metadata progressively in background (will render when done)
+        if (allVideoPaths.length > 0) {
+            console.log(`📹 Starting progressive load for ${allVideoPaths.length} videos...`);
+            // Start loading in background, but don't wait
+            loadVideoMetadata(allVideoPaths).then(() => {
+                // Re-render with full metadata when done
+                console.log('🎉 Video metadata loading complete, re-rendering...');
+                renderRecordings();
+            });
+        }
 
         // Fetch study groups configuration
         try {
@@ -307,9 +378,26 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
             return;
         }
 
-        if (rec.videosWithStatus && rec.videosWithStatus.length > 0) {
+        // Support both old API (videosWithStatus) and new API (videoPaths)
+        const videos = rec.videosWithStatus || (rec.videoPaths || []).map(path => {
+            // Get metadata from cache, or return placeholder
+            const metadata = videoMetadataCache.get(path);
+            return metadata || {
+                path,
+                filename: path.split('/').pop(),
+                recordingTime: null,
+                endTimestamp: '',
+                duration: '',
+                fileSize: '...',
+                fileSizeBytes: 0,
+                isTimebolted: false,
+                detectionMethod: 'unknown'
+            };
+        });
+
+        if (videos && videos.length > 0) {
             hasAnyVideos = true;
-            rec.videosWithStatus.forEach(video => {
+            videos.forEach(video => {
                 // Get drive file size for comparison
                 const driveKey = `${rec.studentGroup}:${rec.date}`;
                 const driveFilesList = driveFiles[driveKey];
@@ -332,6 +420,7 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
                     path: video.path,
                     filename: video.filename,
                     recordingTime: video.recordingTime,
+                    endTimestamp: video.endTimestamp,
                     duration: video.duration,
                     fileSize: video.fileSize,
                     fileSizeBytes: video.fileSizeBytes,

@@ -21,3 +21,4 @@ bun.lockb
 # System files
 .DS_Store
 *.log
+server.pid

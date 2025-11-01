@@ -1,15 +1,195 @@
 #!/usr/bin/env bun
 
 import { serve } from 'bun';
-import { readFileSync, existsSync, unlinkSync, statSync, readdirSync, renameSync } from 'fs';
+import { readFileSync, existsSync, unlinkSync, statSync, readdirSync, renameSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
+/**
+ * Logger class - logs to both console and server.log file with timestamps
+ */
+class Logger {
+  private logFile = 'server.log';
+
+  private formatTimestamp(): string {
+    const now = new Date();
+    return now.toISOString();
+  }
+
+  log(...args: any[]) {
+    const timestamp = this.formatTimestamp();
+    let message = args.map(arg =>
+      typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+    ).join(' ');
+
+    // Log to console (original format with newlines)
+    console.log(...args);
+
+    // For file logging, strip ALL leading and trailing newlines
+    const cleanMessage = message.replace(/^\n+/, '').replace(/\n+$/, '');
+
+    // Skip empty messages to avoid empty lines
+    if (!cleanMessage) {
+      return;
+    }
+
+    // Log to file - clean message with timestamp, always single newline at end
+    try {
+      appendFileSync(
+        this.logFile,
+        `[${timestamp}] ${cleanMessage}\n`
+      );
+    } catch (e) {
+      console.error('Failed to write to log file:', e);
+    }
+  }
+
+  error(...args: any[]) {
+    const timestamp = this.formatTimestamp();
+    let message = args.map(arg =>
+      typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+    ).join(' ');
+
+    // Log to console (original format with newlines)
+    console.error(...args);
+
+    // For file logging, strip ALL leading and trailing newlines
+    const cleanMessage = message.replace(/^\n+/, '').replace(/\n+$/, '');
+
+    // Skip empty messages to avoid empty lines
+    if (!cleanMessage) {
+      return;
+    }
+
+    // Log to file with ERROR prefix - clean message, always single newline at end
+    try {
+      appendFileSync(
+        this.logFile,
+        `[${timestamp}] ERROR: ${cleanMessage}\n`
+      );
+    } catch (e) {
+      console.error('Failed to write to log file:', e);
+    }
+  }
+}
+
+const logger = new Logger();
+
 const PORT = 3000;
 const STUDY_GROUPS_PATH = 'config/study-groups.json';
+const MAX_CONCURRENT_VIDEOS = 4; // Limit concurrent video processing to avoid CPU overload
+const MAX_CONCURRENT_FFMPEG = 5; // Global limit for concurrent ffmpeg processes
+
+/**
+ * Semaphore for limiting concurrent ffmpeg processes
+ */
+class FfmpegSemaphore {
+  private queue: (() => void)[] = [];
+  private running = 0;
+  private activeOperations: Map<number, string> = new Map();
+  private operationIdCounter = 0;
+
+  constructor(private limit: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.running < this.limit) {
+      this.running++;
+      return;
+    }
+
+    return new Promise<void>(resolve => {
+      this.queue.push(resolve);
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) {
+      this.running++;
+      next();
+    }
+  }
+
+  async run<T>(fn: () => Promise<T>, description: string): Promise<T> {
+    const operationId = this.operationIdCounter++;
+    await this.acquire();
+
+    try {
+      this.activeOperations.set(operationId, description);
+      return await fn();
+    } finally {
+      this.activeOperations.delete(operationId);
+      this.release();
+    }
+  }
+
+  getStatus(): { running: number; operations: string[] } {
+    return {
+      running: this.running,
+      operations: Array.from(this.activeOperations.values())
+    };
+  }
+}
+
+const ffmpegSemaphore = new FfmpegSemaphore(MAX_CONCURRENT_FFMPEG);
+
+/**
+ * Run ffmpeg command with global concurrency control
+ */
+async function runFfmpeg(command: string, description: string): Promise<{ stdout: string; stderr: string }> {
+  return ffmpegSemaphore.run(() => execAsync(command), description);
+}
+
+/**
+ * Status logger - logs ffmpeg manager status every 10 seconds
+ */
+setInterval(() => {
+  const status = ffmpegSemaphore.getStatus();
+  if (status.running > 0) {
+    logger.log(`\n🎬 FFMPEG Status: ${status.running}/${MAX_CONCURRENT_FFMPEG} processes running`);
+    status.operations.forEach((op, index) => {
+      logger.log(`   ${index + 1}. ${op}`);
+    });
+  }
+}, 10000);
+
+/**
+ * In-memory lock to prevent duplicate video processing
+ * Maps video path -> Promise<metadata>
+ */
+const processingVideos = new Map<string, Promise<any>>();
+
+
+/**
+ * Process items with concurrency limit
+ */
+async function processConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  processor: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  const executing: Promise<void>[] = [];
+
+  for (const item of items) {
+    const promise = processor(item).then(result => {
+      results.push(result);
+      executing.splice(executing.indexOf(promise), 1);
+    });
+    executing.push(promise);
+
+    if (executing.length >= concurrency) {
+      await Promise.race(executing);
+    }
+  }
+
+  await Promise.all(executing);
+  return results;
+}
 
 /**
  * Load study groups configuration
@@ -151,13 +331,13 @@ async function performBackgroundUpload(
     let lastEmitTime = 0;
     const EMIT_INTERVAL_MS = 1000;
 
-    console.log(`🔄 Background upload loop starting for ${filename}...`);
+    logger.log(`🔄 Background upload loop starting for ${filename}...`);
 
     // Upload in chunks
     while (bytesUploaded < totalBytes) {
       // Check if upload was paused by user
       if (cancelledUploads.has(uploadId)) {
-        console.log(`⏸️  Upload paused by user: ${filename}`);
+        logger.log(`⏸️  Upload paused by user: ${filename}`);
         cancelledUploads.delete(uploadId);
         uploadAbortControllers.delete(uploadId);
 
@@ -217,7 +397,7 @@ async function performBackgroundUpload(
           }
 
           // Update interrupted upload state on disk (for resume capability)
-          console.log(`💾 Progress ${percent}%: Updating state on disk (${Math.round(bytesUploaded / (1024 * 1024))} MB / ${Math.round(totalBytes / (1024 * 1024))} MB)`);
+          logger.log(`💾 Progress ${percent}%: Updating state on disk (${Math.round(bytesUploaded / (1024 * 1024))} MB / ${Math.round(totalBytes / (1024 * 1024))} MB)`);
           saveInterruptedUpload(videoPath, {
             videoPath,
             uploadSessionUrl: uploadUrl,
@@ -232,7 +412,7 @@ async function performBackgroundUpload(
         // Check if upload is complete
         if (chunkResponse.status === 200 || chunkResponse.status === 201) {
           const file = await chunkResponse.json() as GoogleDriveFile;
-          console.log(`✅ Upload complete! File ID: ${file.id}`);
+          logger.log(`✅ Upload complete! File ID: ${file.id}`);
 
           // Ensure final 100% is emitted
           const progress = uploadProgress.get(uploadId);
@@ -252,7 +432,7 @@ async function performBackgroundUpload(
           }
 
           // Remove from interrupted uploads (no longer needs resume)
-          console.log(`🗑️  Removing from active-uploads.json (upload complete)`);
+          logger.log(`🗑️  Removing from active-uploads.json (upload complete)`);
           removeInterruptedUpload(videoPath);
           uploadAbortControllers.delete(uploadId);
 
@@ -275,7 +455,7 @@ async function performBackgroundUpload(
         // Check if this was an abort (either timeout or user cancel)
         if (chunkError.name === 'AbortError' || abortController.signal.aborted) {
           // Don't throw - let the outer loop check cancellation status
-          console.log(`⏸️  Chunk upload aborted (timeout or cancel)`);
+          logger.log(`⏸️  Chunk upload aborted (timeout or cancel)`);
         } else {
           // Re-throw other errors
           throw chunkError;
@@ -285,10 +465,10 @@ async function performBackgroundUpload(
 
     throw new Error('Upload completed but no success response received');
   } catch (error: any) {
-    console.error(`❌ Background upload error for ${filename}:`, error);
-    console.error(`   Error type: ${error.code || error.name}`);
-    console.error(`   Error message: ${error.message}`);
-    console.log(`💾 State preserved in active-uploads.json for resume`);
+    logger.error(`❌ Background upload error for ${filename}:`, error);
+    logger.error(`   Error type: ${error.code || error.name}`);
+    logger.error(`   Error message: ${error.message}`);
+    logger.log(`💾 State preserved in active-uploads.json for resume`);
 
     // Mark as error
     const progress = uploadProgress.get(uploadId);
@@ -360,7 +540,7 @@ async function getFileHash(filePath: string): Promise<string | null> {
     const hash = Bun.hash.xxHash3(buffer);
     return hash.toString();
   } catch (error) {
-    console.error('Hash error:', error);
+    logger.error('Hash error:', error);
     return null;
   }
 }
@@ -369,15 +549,16 @@ async function getFileHash(filePath: string): Promise<string | null> {
 async function detectTimeboltBySilence(videoPath: string): Promise<boolean> {
   try {
     // Analyze first 5 seconds for silences >1 second at -30dB threshold
-    const { stdout } = await execAsync(
-      `ffmpeg -i "${videoPath}" -t 5 -af "silencedetect=noise=-30dB:d=1" -f null - 2>&1 | grep "silence_duration" | wc -l`
+    const { stdout } = await runFfmpeg(
+      `ffmpeg -i "${videoPath}" -t 5 -af "silencedetect=noise=-30dB:d=1" -f null - 2>&1 | grep "silence_duration" | wc -l`,
+      `Silence detection: ${videoPath.split('/').pop()}`
     );
 
     const silenceCount = parseInt(stdout.trim());
     // 0 silences = likely timebolted, ≥1 silence = likely original
     return silenceCount === 0;
   } catch (error) {
-    console.error('Silence detection error:', error);
+    logger.error('Silence detection error:', error);
     return false;
   }
 }
@@ -385,13 +566,14 @@ async function detectTimeboltBySilence(videoPath: string): Promise<boolean> {
 // Get video duration in seconds
 async function getVideoDuration(videoPath: string): Promise<number | null> {
   try {
-    const { stdout } = await execAsync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`
+    const { stdout } = await runFfmpeg(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
+      `Get duration: ${videoPath.split('/').pop()}`
     );
     const duration = parseFloat(stdout.trim());
     return isNaN(duration) ? null : duration;
   } catch (error) {
-    console.error('Duration extraction error:', error);
+    logger.error('Duration extraction error:', error);
     return null;
   }
 }
@@ -459,11 +641,12 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
 
   try {
     const filename = videoPath.split('/').pop() || '';
-    console.log(`Extracting timestamp from: ${filename}`);
+    logger.log(`Extracting timestamp from: ${filename}`);
 
     // Get video dimensions first
-    const { stdout: probeOutput } = await execAsync(
-      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${videoPath}"`
+    const { stdout: probeOutput } = await runFfmpeg(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${videoPath}"`,
+      `Get dimensions: ${filename}`
     );
 
     const [widthStr, heightStr] = probeOutput.trim().split(',');
@@ -471,7 +654,7 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
     const height = parseInt(heightStr);
 
     if (!width || !height) {
-      console.error(`Could not detect video dimensions for ${filename}`);
+      logger.error(`Could not detect video dimensions for ${filename}`);
       return null;
     }
 
@@ -486,117 +669,123 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
     // Debug filenames based on video filename
     const videoFilename = videoPath.split('/').pop()?.replace(/\.mp4$/, '') || 'unknown';
 
-    // Calculate crop area for bottom-right timestamp using systematic quartering:
-    // 1. Take bottom-right quarter (width/2, height/2)
-    // 2. Take bottom-right quarter of that (width/4, height/4) starting at (3*width/4, 3*height/4)
-    // 3. Keep full horizontal but halve vertical (bottom half) = final area at bottom 12.5% height, rightmost 25% width
-    const cropWidth = Math.floor(width * 0.25);
-    const cropHeight = Math.floor(height * 0.125);
-    const cropX = Math.floor(width * 0.75);
-    const cropY = Math.floor(height * 0.875);
+    // Calculate crop area for bottom-right timestamp
+    // Zoom timestamps are positioned at fixed pixel offsets from edges, not percentages
+    // Crop a fixed-size region from bottom-right corner to capture just the timestamp box
+    const timestampBoxWidth = 300;   // Width of timestamp box in pixels
+    const timestampBoxHeight = 45;   // Height of timestamp box in pixels
+    const marginRight = 21;          // Pixels from right edge
+    const marginBottom = 15;         // Pixels from bottom edge
 
-    // Process frames 0, 3, 7, 10, 14 in parallel (non-consecutive to catch more cases)
+    const cropWidth = Math.min(timestampBoxWidth, width - marginRight);
+    const cropHeight = Math.min(timestampBoxHeight, height - marginBottom);
+    const cropX = Math.max(0, width - timestampBoxWidth - marginRight);
+    const cropY = Math.max(0, height - timestampBoxHeight - marginBottom);
+
+    // Process frames 0, 3, 7, 10, 14 SEQUENTIALLY (to avoid CPU overload)
     const framesToTry = [0, 3, 7, 10, 14];
-    const framePromises = framesToTry.map((frameNum) => {
-      return (async () => {
-        const tempImagePath = join(tempDir, `frame_${Date.now()}_${frameNum}.png`);
-        const debugFullPath = join(debugDir, `${videoFilename}_frame${frameNum}_full.png`);
-        const debugCropPath = join(debugDir, `${videoFilename}_frame${frameNum}.png`);
+    const results: any[] = [];
 
+    for (const frameNum of framesToTry) {
+      const tempImagePath = join(tempDir, `frame_${Date.now()}_${frameNum}.png`);
+      const debugFullPath = join(debugDir, `${videoFilename}_frame${frameNum}_full.png`);
+      const debugCropPath = join(debugDir, `${videoFilename}_frame${frameNum}.png`);
+
+      try {
+        // Extract full frame for debugging
+        await runFfmpeg(
+          `ffmpeg -i "${videoPath}" -vf "select=eq(n\\,${frameNum})" -vframes 1 "${debugFullPath}" -y 2>&1`,
+          `Extract start frame ${frameNum} (debug): ${videoFilename}`
+        );
+
+        // Extract frame, crop to bottom-right timestamp, and scale up 4x
+        // Use minimal preprocessing - aggressive filters can corrupt text
+        await runFfmpeg(
+          `ffmpeg -i "${videoPath}" -vf "select=eq(n\\,${frameNum}),crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},scale=iw*4:ih*4" -vframes 1 "${tempImagePath}" -y 2>&1`,
+          `Extract start frame ${frameNum}: ${videoFilename}`
+        );
+
+        // Copy the cropped/processed image to debug directory
+        await execAsync(`cp "${tempImagePath}" "${debugCropPath}"`);
+
+        // Use Tesseract to extract text from the cropped image
+        const { stdout } = await execAsync(
+          `tesseract "${tempImagePath}" stdout --psm 7`
+        );
+
+        // Clean up temp image
         try {
-          // Extract full frame for debugging
-          await execAsync(
-            `ffmpeg -i "${videoPath}" -vf "select=eq(n\\,${frameNum})" -vframes 1 "${debugFullPath}" -y 2>&1`
-          );
+          await execAsync(`rm "${tempImagePath}"`);
+        } catch (e) {
+          // Ignore cleanup errors
+        }
 
-          // Extract frame, crop to precise bottom-right corner (systematic quartering approach),
-          // scale up 4x and apply enhancement filters for better OCR
-          await execAsync(
-            `ffmpeg -i "${videoPath}" -vf "select=eq(n\\,${frameNum}),crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},scale=iw*4:ih*4,unsharp=7:7:2.5,eq=contrast=2:brightness=0.1" -vframes 1 "${tempImagePath}" -y 2>&1`
-          );
+        // Clean up OCR output - replace common OCR mistakes
+        let cleanedText = stdout.trim()
+          .replace(/[;,()]/g, '-')
+          .replace(/[°*]/g, ':')
+          .replace(/[oOQ]/g, '0')
+          .replace(/[lI|]/g, '1')
+          .replace(/[Uu]/g, '0')
+          .replace(/[Zz]/g, '2')
+          .replace(/\s+/g, ' ')
+          .replace(/--+/g, '-')
+          .replace(/[Ff]/g, '7');
 
-          // Copy the cropped/processed image to debug directory
-          await execAsync(`cp "${tempImagePath}" "${debugCropPath}"`);
+        logger.log(`  Frame ${frameNum} OCR raw: "${stdout.trim()}"`);
+        logger.log(`  Frame ${frameNum} OCR cleaned: "${cleanedText}"`);
 
-          // Use Tesseract to extract text from the cropped image
-          const { stdout } = await execAsync(
-            `tesseract "${tempImagePath}" stdout --psm 7`
-          );
+        // Parse and validate timestamp
+        const timestampMatch = cleanedText.match(/(\d{4}[-]\d{1,2}[-]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})/);
+        let extractedTimestamp = timestampMatch ? timestampMatch[1] : null;
 
-          // Clean up temp image
-          try {
-            await execAsync(`rm "${tempImagePath}"`);
-          } catch (e) {
-            // Ignore cleanup errors
-          }
+        if (extractedTimestamp) {
+          const parts = extractedTimestamp.split(/[-\s:]/);
+          if (parts.length === 6) {
+            const [year, month, day, hour, minute, second] = parts;
+            // Format without seconds
+            extractedTimestamp = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
 
-          // Clean up OCR output - replace common OCR mistakes
-          let cleanedText = stdout.trim()
-            .replace(/[;,()]/g, '-')
-            .replace(/[°*]/g, ':')
-            .replace(/[oOQ]/g, '0')
-            .replace(/[lI|]/g, '1')
-            .replace(/[Uu]/g, '0')
-            .replace(/[Zz]/g, '2')
-            .replace(/\s+/g, ' ')
-            .replace(/--+/g, '-')
-            .replace(/[Ff]/g, '7');
+            // Validate timestamp values
+            const yearNum = parseInt(year);
+            const monthNum = parseInt(month);
+            const dayNum = parseInt(day);
+            const hourNum = parseInt(hour);
+            const minuteNum = parseInt(minute);
+            const secondNum = parseInt(second);
 
-          console.log(`  Frame ${frameNum} OCR raw: "${stdout.trim()}"`);
-          console.log(`  Frame ${frameNum} OCR cleaned: "${cleanedText}"`);
-
-          // Parse and validate timestamp
-          const timestampMatch = cleanedText.match(/(\d{4}[-]\d{1,2}[-]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})/);
-          let extractedTimestamp = timestampMatch ? timestampMatch[1] : null;
-
-          if (extractedTimestamp) {
-            const parts = extractedTimestamp.split(/[-\s:]/);
-            if (parts.length === 6) {
-              const [year, month, day, hour, minute, second] = parts;
-              // Format without seconds
-              extractedTimestamp = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
-
-              // Validate timestamp values
-              const yearNum = parseInt(year);
-              const monthNum = parseInt(month);
-              const dayNum = parseInt(day);
-              const hourNum = parseInt(hour);
-              const minuteNum = parseInt(minute);
-              const secondNum = parseInt(second);
-
-              if (yearNum >= 2024 && yearNum <= 2026 &&
-                  monthNum >= 1 && monthNum <= 12 &&
-                  dayNum >= 1 && dayNum <= 31 &&
-                  hourNum >= 0 && hourNum <= 23 &&
-                  minuteNum >= 0 && minuteNum <= 59 &&
-                  secondNum >= 0 && secondNum <= 59) {
-                console.log(`  Frame ${frameNum} ✓ Valid timestamp: ${extractedTimestamp}`);
-                return { frameNum, timestamp: extractedTimestamp };
-              } else {
-                console.log(`  Frame ${frameNum} ✗ Invalid values`);
-              }
+            if (yearNum >= 2024 && yearNum <= 2026 &&
+                monthNum >= 1 && monthNum <= 12 &&
+                dayNum >= 1 && dayNum <= 31 &&
+                hourNum >= 0 && hourNum <= 23 &&
+                minuteNum >= 0 && minuteNum <= 59 &&
+                secondNum >= 0 && secondNum <= 59) {
+              logger.log(`  Frame ${frameNum} ✓ Valid timestamp: ${extractedTimestamp}`);
+              results.push({ frameNum, timestamp: extractedTimestamp });
+              break; // Stop after first valid timestamp
+            } else {
+              logger.log(`  Frame ${frameNum} ✗ Invalid values`);
+              results.push({ frameNum, timestamp: null });
             }
           } else {
-            console.log(`  Frame ${frameNum} ✗ No pattern found`);
+            results.push({ frameNum, timestamp: null });
           }
-
-          return { frameNum, timestamp: null };
-        } catch (error) {
-          console.error(`  Frame ${frameNum} error:`, error);
-          return { frameNum, timestamp: null };
+        } else {
+          logger.log(`  Frame ${frameNum} ✗ No pattern found`);
+          results.push({ frameNum, timestamp: null });
         }
-      })();
-    });
-
-    // Wait for all frames to be processed
-    const results = await Promise.all(framePromises);
+      } catch (error) {
+        logger.error(`  Frame ${frameNum} error:`, error);
+        results.push({ frameNum, timestamp: null });
+      }
+    }
 
     // Find first valid timestamp
     const validResult = results.find(r => r.timestamp !== null);
     const timestamp = validResult?.timestamp || null;
     const successfulFrame = validResult?.frameNum ?? -1;
 
-    console.log(`Final start timestamp: ${timestamp} (from frame ${successfulFrame})`);
+    logger.log(`Final start timestamp: ${timestamp} (from frame ${successfulFrame})`);
 
     // Get video duration and extract end timestamp from last frame
     let durationStr = '';
@@ -605,17 +794,21 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
       const durationSeconds = await getVideoDuration(videoPath);
       if (durationSeconds) {
         durationStr = formatFuzzyDuration(durationSeconds);
-        console.log(`  Duration: ${durationStr} (${durationSeconds.toFixed(0)}s)`);
+        logger.log(`  Duration: ${durationStr} (${durationSeconds.toFixed(0)}s)`);
 
         // Extract timestamp from last frame (since video might be edited/timebolted)
         try {
-          // Get total frame count
-          const { stdout: frameCountOutput } = await execAsync(
-            `ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "${videoPath}"`
+          // Get total frame count and FPS for time-based seeking
+          const { stdout: frameCountOutput } = await runFfmpeg(
+            `ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "${videoPath}"`,
+            `Get frame count: ${filename}`
           );
           const totalFrames = parseInt(frameCountOutput.trim());
+          const fps = totalFrames / durationSeconds;
+          logger.log(`  Total frames: ${totalFrames}, FPS: ${fps.toFixed(2)}`);
 
           if (totalFrames > 15) {
+            logger.log(`  Extracting end timestamp from last frames...`);
             // Extract timestamp from last frames (going backwards from end, similar to start strategy)
             const lastFramesToTry = [
               totalFrames - 1,   // Last frame
@@ -625,86 +818,95 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
               totalFrames - 15   // -14 frames
             ].filter(f => f > 0);
 
-            // Process frames in parallel
-            const endFramePromises = lastFramesToTry.map((frameNum) => {
-              return (async () => {
-                const tempImagePath = join(tempDir, `frame_end_${Date.now()}_${frameNum}.png`);
+            // Process frames SEQUENTIALLY (to avoid CPU overload)
+            const endResults: any[] = [];
 
-                try {
-                  await execAsync(
-                    `ffmpeg -i "${videoPath}" -vf "select=eq(n\\,${frameNum}),crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},scale=iw*4:ih*4,unsharp=7:7:2.5,eq=contrast=2:brightness=0.1" -vframes 1 "${tempImagePath}" -y 2>&1`
-                  );
+            for (const frameNum of lastFramesToTry) {
+              const tempImagePath = join(tempDir, `frame_end_${Date.now()}_${frameNum}.png`);
 
-                  const { stdout } = await execAsync(`tesseract "${tempImagePath}" stdout --psm 7`);
+              try {
+                // Calculate time position for this frame (time-based seeking is MUCH faster than frame-based)
+                const seekTime = frameNum / fps;
+                logger.log(`  Extracting end frame ${frameNum} (seek to ${seekTime.toFixed(2)}s)...`);
 
-                  // Clean OCR output
-                  let cleanedText = stdout.trim()
-                    .replace(/[;,()]/g, '-')
-                    .replace(/[°*]/g, ':')
-                    .replace(/[oOQ]/g, '0')
-                    .replace(/[lI|]/g, '1')
-                    .replace(/[Uu]/g, '0')
-                    .replace(/[Zz]/g, '2')
-                    .replace(/\s+/g, ' ')
-                    .replace(/--+/g, '-')
-                    .replace(/[Ff]/g, '7');
+                // Use -ss BEFORE -i for fast seeking, then extract 1 frame
+                // Use MINIMAL preprocessing for end frames - unsharp/eq filters corrupt colons
+                await runFfmpeg(
+                  `ffmpeg -ss ${seekTime.toFixed(3)} -i "${videoPath}" -vf "crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},scale=iw*4:ih*4" -vframes 1 "${tempImagePath}" -y 2>&1`,
+                  `Extract end frame ${frameNum}: ${filename}`
+                );
 
-                  console.log(`  End frame ${frameNum} OCR raw: "${stdout.trim()}"`);
-                  console.log(`  End frame ${frameNum} OCR cleaned: "${cleanedText}"`);
+                logger.log(`  Running OCR on end frame ${frameNum}...`);
+                const { stdout } = await execAsync(`tesseract "${tempImagePath}" stdout --psm 7`);
 
-                  const timestampMatch = cleanedText.match(/(\d{4}[-]\d{1,2}[-]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})/);
-                  if (timestampMatch) {
-                    const parts = timestampMatch[1].split(/[-\s:]/);
-                    if (parts.length === 6) {
-                      const [year, month, day, hour, minute, second] = parts;
+                // Clean OCR output
+                let cleanedText = stdout.trim()
+                  .replace(/[;,()]/g, '-')
+                  .replace(/[°*]/g, ':')
+                  .replace(/[oOQ]/g, '0')
+                  .replace(/[lI|]/g, '1')
+                  .replace(/[Uu]/g, '0')
+                  .replace(/[Zz]/g, '2')
+                  .replace(/\s+/g, ' ')
+                  .replace(/--+/g, '-')
+                  .replace(/[Ff]/g, '7');
 
-                      // Validate timestamp values
-                      const yearNum = parseInt(year);
-                      const monthNum = parseInt(month);
-                      const dayNum = parseInt(day);
-                      const hourNum = parseInt(hour);
-                      const minuteNum = parseInt(minute);
-                      const secondNum = parseInt(second);
+                logger.log(`  End frame ${frameNum} OCR raw: "${stdout.trim()}"`);
+                logger.log(`  End frame ${frameNum} OCR cleaned: "${cleanedText}"`);
 
-                      if (yearNum >= 2024 && yearNum <= 2026 &&
-                          monthNum >= 1 && monthNum <= 12 &&
-                          dayNum >= 1 && dayNum <= 31 &&
-                          hourNum >= 0 && hourNum <= 23 &&
-                          minuteNum >= 0 && minuteNum <= 59 &&
-                          secondNum >= 0 && secondNum <= 59) {
-                        const endTime = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
-                        console.log(`  End frame ${frameNum} ✓ Valid timestamp: ${endTime}`);
-                        return { frameNum, endTime };
-                      } else {
-                        console.log(`  End frame ${frameNum} ✗ Invalid values`);
-                      }
+                const timestampMatch = cleanedText.match(/(\d{4}[-]\d{1,2}[-]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})/);
+                if (timestampMatch) {
+                  const parts = timestampMatch[1].split(/[-\s:]/);
+                  if (parts.length === 6) {
+                    const [year, month, day, hour, minute, second] = parts;
+
+                    // Validate timestamp values
+                    const yearNum = parseInt(year);
+                    const monthNum = parseInt(month);
+                    const dayNum = parseInt(day);
+                    const hourNum = parseInt(hour);
+                    const minuteNum = parseInt(minute);
+                    const secondNum = parseInt(second);
+
+                    if (yearNum >= 2024 && yearNum <= 2026 &&
+                        monthNum >= 1 && monthNum <= 12 &&
+                        dayNum >= 1 && dayNum <= 31 &&
+                        hourNum >= 0 && hourNum <= 23 &&
+                        minuteNum >= 0 && minuteNum <= 59 &&
+                        secondNum >= 0 && secondNum <= 59) {
+                      const endTime = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+                      logger.log(`  End frame ${frameNum} ✓ Valid timestamp: ${endTime}`);
+                      endResults.push({ frameNum, endTime });
+                      break; // Stop after first valid timestamp
+                    } else {
+                      logger.log(`  End frame ${frameNum} ✗ Invalid values`);
+                      endResults.push({ frameNum, endTime: null });
                     }
                   } else {
-                    console.log(`  End frame ${frameNum} ✗ No pattern found`);
+                    endResults.push({ frameNum, endTime: null });
                   }
-
-                  // Cleanup temp file
-                  await execAsync(`rm -f "${tempImagePath}"`);
-                  return { frameNum, endTime: null };
-                } catch (e) {
-                  console.error(`  End frame ${frameNum} error:`, e);
-                  return { frameNum, endTime: null };
+                } else {
+                  logger.log(`  End frame ${frameNum} ✗ No pattern found`);
+                  endResults.push({ frameNum, endTime: null });
                 }
-              })();
-            });
 
-            // Wait for all end frames to be processed
-            const endResults = await Promise.all(endFramePromises);
+                // Cleanup temp file
+                await execAsync(`rm -f "${tempImagePath}"`);
+              } catch (e) {
+                logger.error(`  End frame ${frameNum} error:`, e);
+                endResults.push({ frameNum, endTime: null });
+              }
+            }
 
             // Find first valid end timestamp
             const validEndResult = endResults.find(r => r.endTime !== null);
             if (validEndResult) {
               endTimestamp = validEndResult.endTime!;
-              console.log(`  Final end timestamp: ${endTimestamp} (from frame ${validEndResult.frameNum})`);
+              logger.log(`  Final end timestamp: ${endTimestamp} (from frame ${validEndResult.frameNum})`);
             }
           }
         } catch (error) {
-          console.log(`  ⚠️ Could not extract end timestamp:`, error);
+          logger.log(`  ⚠️ Could not extract end timestamp:`, error);
         }
       }
     }
@@ -717,12 +919,12 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
           const debugCropPath = join(debugDir, `${videoFilename}_frame${frameNum}.png`);
           await execAsync(`rm -f "${debugFullPath}" "${debugCropPath}"`);
         }
-        console.log(`  ✓ Cleaned up debug images (extraction successful)`);
+        logger.log(`  ✓ Cleaned up debug images (extraction successful)`);
       } catch (e) {
         // Ignore cleanup errors
       }
     } else {
-      console.log(`  ⚠️ Keeping debug images (extraction failed)`);
+      logger.log(`  ⚠️ Keeping debug images (extraction failed)`);
     }
 
     // Cache the result (even if null, to avoid reprocessing)
@@ -739,7 +941,7 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
 
     return timestamp ? { timestamp, duration: durationStr, endTimestamp } : null;
   } catch (error) {
-    console.error('Timestamp extraction error:', error);
+    logger.error('Timestamp extraction error:', error);
     return null;
   }
 }
@@ -779,7 +981,7 @@ async function analyzeVideo(videoPath: string) {
   }
 
   // Perform silence analysis
-  console.log(`Analyzing video for timebolt: ${filename}`);
+  logger.log(`Analyzing video for timebolt: ${filename}`);
   const isTimeboltedBySilence = await detectTimeboltBySilence(videoPath);
 
   // Update cache with hash only
@@ -912,12 +1114,11 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Get status
   if (path === '/api/status') {
     const apiStartTime = Date.now();
-    console.log('\n🔍 API /api/status called');
+    logger.log('\n🔍 API /api/status called');
 
-    // Check status cache first - always use cache if source files haven't changed
+    // Check status cache first
     const statusCache = loadJSON('data/status-cache.json');
     if (statusCache) {
-      // Validate cache: check if source files have changed
       const recordingsMtime = getFileMtime('data/lecture_recordings.json');
       const timesMtime = getFileMtime('data/times_simplified.json');
       const driveMtime = getFileMtime('data/drive-files.json');
@@ -925,34 +1126,29 @@ async function handleRequest(req: Request): Promise<Response> {
       if (statusCache.recordingsMtime === recordingsMtime &&
           statusCache.timesMtime === timesMtime &&
           statusCache.driveMtime === driveMtime) {
-        console.log('✅ Using cached status (no file changes detected)');
+        logger.log('✅ Using cached status (no file changes detected)');
         const cacheTime = Date.now() - apiStartTime;
-        console.log(`⚡ Cache response time: ${cacheTime}ms\n`);
+        logger.log(`⚡ Cache response time: ${cacheTime}ms\n`);
         return new Response(JSON.stringify({
           recordings: statusCache.recordings,
           timesSimplified: statusCache.timesSimplified,
           driveFiles: statusCache.driveFiles
         }), { headers });
       } else {
-        console.log('🔄 Source files changed - rebuilding cache with incremental updates');
+        logger.log('🔄 Source files changed - rebuilding cache');
       }
     }
 
     const loadStartTime = Date.now();
-    console.log('📂 Loading JSON files...');
+    logger.log('📂 Loading JSON files...');
     const recordings = loadJSON('data/lecture_recordings.json') || [];
-    console.log(`   - lecture_recordings.json: ${Date.now() - loadStartTime}ms`);
-    const timesLoadStart = Date.now();
     const timesSimplified = loadJSON('data/times_simplified.json') || [];
-    console.log(`   - times_simplified.json: ${Date.now() - timesLoadStart}ms`);
-    const driveLoadStart = Date.now();
     const driveFiles = loadJSON('data/drive-files.json') || {};
-    console.log(`   - drive-files.json: ${Date.now() - driveLoadStart}ms`);
-    console.log(`⏱️  Total JSON load time: ${Date.now() - loadStartTime}ms`);
+    logger.log(`⏱️  Total JSON load time: ${Date.now() - loadStartTime}ms`);
 
-    // Create a map of date:group -> array of times for quick lookup
+    // Create times map
     const mapStartTime = Date.now();
-    console.log('🗺️  Building times map...');
+    logger.log('🗺️  Building times map...');
     const timesMap = new Map();
     timesSimplified.forEach((time: any) => {
       const key = `${time.date}:${time.studentGroup}`;
@@ -961,118 +1157,29 @@ async function handleRequest(req: Request): Promise<Response> {
       }
       timesMap.get(key).push({ start: time.start, end: time.end });
     });
-    console.log(`⏱️  Times map built: ${Date.now() - mapStartTime}ms`);
+    logger.log(`⏱️  Times map built: ${Date.now() - mapStartTime}ms`);
 
-    // Count total videos to process
-    const totalVideos = recordings.reduce((sum: number, rec: any) =>
-      sum + (rec.videos ? rec.videos.length : 0), 0);
-    console.log(`📹 Processing ${totalVideos} videos across ${recordings.length} recordings`);
-
-    // Load previous video metadata cache for hash comparison
-    const previousStatusCache = loadJSON('data/status-cache.json');
-    const videoMetadataCache = previousStatusCache?.videoMetadataCache || {};
-
-    // Process ALL videos across ALL recordings in parallel
+    // Add lesson time ranges to recordings (no video metadata processing)
     const processingStartTime = Date.now();
-    const newVideoMetadataCache: any = {};
+    recordings.forEach((recording: any) => {
+      const timeInfoArray = timesMap.get(`${recording.date}:${recording.studentGroup}`);
+      if (timeInfoArray && timeInfoArray.length > 0) {
+        const timeRanges = timeInfoArray.map((t: any) => `${t.start} - ${t.end}`);
+        const combinedRange = timeRanges.join(', ');
+        recording.lessonStart = timeInfoArray[0].start;
+        recording.lessonEnd = timeInfoArray[timeInfoArray.length - 1].end;
+        recording.lessonTimeRange = combinedRange;
+      }
 
-    await Promise.all(
-      recordings.map(async (recording: any) => {
-        // Add lesson time range(s) - may be multiple for same group on same day
-        const timeInfoArray = timesMap.get(`${recording.date}:${recording.studentGroup}`);
-        if (timeInfoArray && timeInfoArray.length > 0) {
-          // Format as "09:10 - 12:25, 14:00 - 16:30" for multiple ranges
-          const timeRanges = timeInfoArray.map((t: any) => `${t.start} - ${t.end}`);
-          const combinedRange = timeRanges.join(', ');
-          // Split back into start and end for compatibility with frontend
-          recording.lessonStart = timeInfoArray[0].start;
-          recording.lessonEnd = timeInfoArray[timeInfoArray.length - 1].end;
-          // Store the full formatted range for display
-          recording.lessonTimeRange = combinedRange;
-        }
+      // Keep video paths but don't process metadata yet
+      if (recording.videos && recording.videos.length > 0) {
+        recording.videoPaths = recording.videos;
+      }
+    });
+    logger.log(`⏱️  Recordings processed: ${Date.now() - processingStartTime}ms`);
 
-        if (recording.videos && recording.videos.length > 0) {
-          recording.videosWithStatus = await Promise.all(
-            recording.videos.map(async (videoPath: string) => {
-              const videoStartTime = Date.now();
-
-              // Compute xxHash3 of first 300 bytes for cache validation
-              const hashStart = Date.now();
-              const fileHash = await getFileHash(videoPath);
-              const hashTime = Date.now() - hashStart;
-
-              // Check if we have cached metadata for this video with matching hash
-              const cachedMetadata = videoMetadataCache[videoPath];
-              if (cachedMetadata && fileHash && cachedMetadata.hash === fileHash) {
-                // Hash matches - use cached metadata (skip expensive operations)
-                newVideoMetadataCache[videoPath] = cachedMetadata;
-
-                const videoTime = Date.now() - videoStartTime;
-                if (videoTime > 10) {
-                  console.log(`✅ Using cached metadata (${videoTime}ms): ${videoPath.split('/').pop()}`);
-                }
-
-                return cachedMetadata.data;
-              }
-
-              // Hash doesn't match or no cache - need to reprocess
-              console.log(`🔄 Processing video (hash changed): ${videoPath.split('/').pop()}`);
-
-              const analysisStart = Date.now();
-              const analysis = await analyzeVideo(videoPath);
-              const analysisTime = Date.now() - analysisStart;
-
-              const timestampStart = Date.now();
-              const timestampData = await extractTimestampFromVideo(videoPath);
-              const timestampTime = Date.now() - timestampStart;
-
-              const fileSizeStart = Date.now();
-              const fileSizeBytes = getFileSize(videoPath);
-              const fileSize = fileSizeBytes ? formatFileSize(fileSizeBytes) : '';
-              const fileSizeTime = Date.now() - fileSizeStart;
-
-              const videoTime = Date.now() - videoStartTime;
-
-              if (videoTime > 1000) {
-                console.log(`⚠️  Slow video (${videoTime}ms): ${videoPath.split('/').pop()}`);
-                console.log(`      - xxHash3: ${hashTime}ms`);
-                console.log(`      - analyzeVideo: ${analysisTime}ms`);
-                console.log(`      - extractTimestamp: ${timestampTime}ms`);
-                console.log(`      - getFileSize: ${fileSizeTime}ms`);
-              }
-
-              const videoData = {
-                path: videoPath,
-                filename: videoPath.split('/').pop(),
-                isTimebolted: analysis.isTimebolted,
-                detectionMethod: analysis.detectionMethod,
-                recordingTime: timestampData?.timestamp || null,
-                endTimestamp: timestampData?.endTimestamp || '',
-                duration: timestampData?.duration || '',
-                fileSize,
-                fileSizeBytes
-              };
-
-              // Store in new cache with hash
-              if (fileHash) {
-                newVideoMetadataCache[videoPath] = {
-                  hash: fileHash,
-                  cachedAt: new Date().toISOString(),
-                  data: videoData
-                };
-              }
-
-              return videoData;
-            })
-          );
-        }
-      })
-    );
-    console.log(`⏱️  Video processing complete: ${Date.now() - processingStartTime}ms`);
-
-    // Save status cache with file mtimes for validation
+    // Save cache
     const cacheStartTime = Date.now();
-    console.log('💾 Preparing cache data...');
     const recordingsMtime = getFileMtime('data/lecture_recordings.json');
     const timesMtime = getFileMtime('data/times_simplified.json');
     const driveMtime = getFileMtime('data/drive-files.json');
@@ -1081,36 +1188,119 @@ async function handleRequest(req: Request): Promise<Response> {
       recordings,
       timesSimplified,
       driveFiles,
-      videoMetadataCache: newVideoMetadataCache,
       recordingsMtime,
       timesMtime,
       driveMtime,
       cachedAt: new Date().toISOString()
     };
 
-    const stringifyStart = Date.now();
-    const cacheJson = JSON.stringify(statusCacheData, null, 2);
-    console.log(`   - JSON.stringify: ${Date.now() - stringifyStart}ms`);
+    await Bun.write('data/status-cache.json', JSON.stringify(statusCacheData, null, 2));
+    logger.log(`⏱️  Cache saved: ${Date.now() - cacheStartTime}ms`);
 
-    const writeStart = Date.now();
-    await Bun.write('data/status-cache.json', cacheJson);
-    console.log(`   - File write: ${Date.now() - writeStart}ms`);
-    console.log(`⏱️  Total cache save time: ${Date.now() - cacheStartTime}ms`);
+    const totalTime = Date.now() - apiStartTime;
+    logger.log(`✅ Total API response time: ${totalTime}ms\n`);
 
-    const responseStartTime = Date.now();
-    console.log('📤 Building response...');
-    const responseData = JSON.stringify({
+    return new Response(JSON.stringify({
       recordings,
       timesSimplified,
       driveFiles
-    });
-    console.log(`   - Response JSON.stringify: ${Date.now() - responseStartTime}ms`);
-    console.log(`   - Response size: ${(responseData.length / 1024).toFixed(2)} KB`);
+    }), { headers });
+  }
 
-    const totalTime = Date.now() - apiStartTime;
-    console.log(`✅ Total API response time: ${totalTime}ms (${(totalTime / 1000).toFixed(2)}s)\n`);
+  // API: Get video metadata (single video)
+  if (path === '/api/video-metadata' && req.method === 'GET') {
+    const url = new URL(req.url);
+    const videoPath = url.searchParams.get('path');
 
-    return new Response(responseData, { headers });
+    if (!videoPath) {
+      return new Response(JSON.stringify({ error: 'Missing path parameter' }), {
+        headers,
+        status: 400
+      });
+    }
+
+    try {
+      // Check if this video is already being processed
+      if (processingVideos.has(videoPath)) {
+        logger.log(`⏳ Video already processing, waiting: ${videoPath.split('/').pop()}`);
+        const result = await processingVideos.get(videoPath);
+        return new Response(JSON.stringify(result), { headers });
+      }
+
+      // Create processing promise
+      const processingPromise = (async () => {
+        try {
+          const startTime = Date.now();
+
+          // Load video metadata cache
+          const videoMetadataCache = loadJSON('data/video-metadata-cache.json') || {};
+
+          // Compute hash for cache validation
+          const fileHash = await getFileHash(videoPath);
+
+          // Check cache first
+          const cachedMetadata = videoMetadataCache[videoPath];
+          if (cachedMetadata && fileHash && cachedMetadata.hash === fileHash) {
+            const responseTime = Date.now() - startTime;
+            logger.log(`✅ Video metadata from cache (${responseTime}ms): ${videoPath.split('/').pop()}`);
+            return cachedMetadata.data;
+          }
+
+          // Not in cache or hash changed - extract metadata
+          logger.log(`🔄 Extracting video metadata: ${videoPath.split('/').pop()}`);
+
+          const analysis = await analyzeVideo(videoPath);
+          const timestampData = await extractTimestampFromVideo(videoPath);
+          const fileSizeBytes = getFileSize(videoPath);
+          const fileSize = fileSizeBytes ? formatFileSize(fileSizeBytes) : '';
+
+          const videoData = {
+            path: videoPath,
+            filename: videoPath.split('/').pop(),
+            isTimebolted: analysis.isTimebolted,
+            detectionMethod: analysis.detectionMethod,
+            recordingTime: timestampData?.timestamp || null,
+            endTimestamp: timestampData?.endTimestamp || '',
+            duration: timestampData?.duration || '',
+            fileSize,
+            fileSizeBytes
+          };
+
+          // Save to cache
+          if (fileHash) {
+            videoMetadataCache[videoPath] = {
+              hash: fileHash,
+              cachedAt: new Date().toISOString(),
+              data: videoData
+            };
+            await Bun.write('data/video-metadata-cache.json', JSON.stringify(videoMetadataCache, null, 2));
+          }
+
+          const responseTime = Date.now() - startTime;
+          logger.log(`✅ Video metadata extracted (${responseTime}ms): ${videoPath.split('/').pop()}`);
+
+          return videoData;
+        } finally {
+          // Remove from processing map when done
+          processingVideos.delete(videoPath);
+        }
+      })();
+
+      // Store promise in map
+      processingVideos.set(videoPath, processingPromise);
+
+      // Wait for result
+      const result = await processingPromise;
+      return new Response(JSON.stringify(result), { headers });
+
+    } catch (error: any) {
+      logger.error(`❌ Error extracting video metadata for ${videoPath}:`, error);
+      processingVideos.delete(videoPath); // Clean up on error
+      return new Response(JSON.stringify({
+        error: 'Failed to extract video metadata',
+        message: error.message
+      }), { headers, status: 500 });
+    }
   }
 
   // API: Get interrupted uploads
@@ -1118,11 +1308,11 @@ async function handleRequest(req: Request): Promise<Response> {
     const interrupted = loadInterruptedUploads();
     const count = Object.keys(interrupted).length;
     if (count > 0) {
-      console.log(`📋 Client requested interrupted uploads: ${count} found`);
+      logger.log(`📋 Client requested interrupted uploads: ${count} found`);
       Object.entries(interrupted).forEach(([path, state]: [string, any]) => {
         const filename = path.split('/').pop();
         const percent = Math.round((state.bytesUploaded / state.bytesTotal) * 100);
-        console.log(`   - ${filename}: ${percent}% (${Math.round(state.bytesUploaded / (1024 * 1024))} MB / ${Math.round(state.bytesTotal / (1024 * 1024))} MB)`);
+        logger.log(`   - ${filename}: ${percent}% (${Math.round(state.bytesUploaded / (1024 * 1024))} MB / ${Math.round(state.bytesTotal / (1024 * 1024))} MB)`);
       });
     }
     return new Response(JSON.stringify(interrupted), { headers });
@@ -1150,10 +1340,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
     const count = Object.keys(active).length;
     if (count > 0) {
-      console.log(`🚀 Client requested active uploads: ${count} in progress`);
+      logger.log(`🚀 Client requested active uploads: ${count} in progress`);
       Object.entries(active).forEach(([path, state]: [string, any]) => {
         const filename = path.split('/').pop();
-        console.log(`   - ${filename}: ${state.percent}% (${Math.round(state.bytesUploaded / (1024 * 1024))} MB / ${Math.round(state.bytesTotal / (1024 * 1024))} MB)`);
+        logger.log(`   - ${filename}: ${state.percent}% (${Math.round(state.bytesUploaded / (1024 * 1024))} MB / ${Math.round(state.bytesTotal / (1024 * 1024))} MB)`);
       });
     }
 
@@ -1187,11 +1377,11 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       const filename = videoPath.split('/').pop() || '';
-      console.log(`▶️  RESUME REQUEST: ${filename}`);
-      console.log(`   📁 Video: ${videoPath}`);
-      console.log(`   📊 Saved state: ${Math.round(uploadState.bytesUploaded / (1024 * 1024))} MB / ${Math.round(uploadState.bytesTotal / (1024 * 1024))} MB (${Math.round((uploadState.bytesUploaded / uploadState.bytesTotal) * 100)}%)`);
-      console.log(`   🔗 Session URL: ${uploadState.uploadSessionUrl.substring(0, 80)}...`);
-      console.log(`   ⏰ Interrupted at: ${uploadState.interruptedAt}`);
+      logger.log(`▶️  RESUME REQUEST: ${filename}`);
+      logger.log(`   📁 Video: ${videoPath}`);
+      logger.log(`   📊 Saved state: ${Math.round(uploadState.bytesUploaded / (1024 * 1024))} MB / ${Math.round(uploadState.bytesTotal / (1024 * 1024))} MB (${Math.round((uploadState.bytesUploaded / uploadState.bytesTotal) * 100)}%)`);
+      logger.log(`   🔗 Session URL: ${uploadState.uploadSessionUrl.substring(0, 80)}...`);
+      logger.log(`   ⏰ Interrupted at: ${uploadState.interruptedAt}`);
 
       // Import Google Drive auth functionality
       const { google } = await import('googleapis');
@@ -1232,7 +1422,7 @@ async function handleRequest(req: Request): Promise<Response> {
       });
       emitProgress(finalUploadId);
 
-      console.log(`🔍 Querying Google Drive for actual upload status...`);
+      logger.log(`🔍 Querying Google Drive for actual upload status...`);
       // Query Google Drive for actual upload status
       const statusResponse = await fetch(uploadSessionUrl, {
         method: 'PUT',
@@ -1245,20 +1435,20 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // Check if session expired (404 Not Found or 410 Gone)
       if (statusResponse.status === 404 || statusResponse.status === 410) {
-        console.log(`   ❌ Status: ${statusResponse.status} - Upload session expired`);
+        logger.log(`   ❌ Status: ${statusResponse.status} - Upload session expired`);
 
         // Try to get Google Drive's error message
         let driveErrorMessage = '';
         try {
           const errorBody = await statusResponse.text();
-          console.log(`   📋 Google Drive response: ${errorBody}`);
+          logger.log(`   📋 Google Drive response: ${errorBody}`);
           const errorJson = JSON.parse(errorBody);
           driveErrorMessage = errorJson.error?.message || errorBody;
         } catch (e) {
           driveErrorMessage = statusResponse.statusText || 'No error details available';
         }
 
-        console.log(`   🗑️  Removing expired session from active-uploads.json`);
+        logger.log(`   🗑️  Removing expired session from active-uploads.json`);
         removeInterruptedUpload(videoPath);
 
         return new Response(JSON.stringify({
@@ -1273,25 +1463,25 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // Check Range header to see how much Google received
       if (statusResponse.status === 308) {
-        console.log(`   Status: 308 Resume Incomplete`);
+        logger.log(`   Status: 308 Resume Incomplete`);
         const rangeHeader = statusResponse.headers.get('Range');
-        console.log(`   Range header: ${rangeHeader || 'none'}`);
+        logger.log(`   Range header: ${rangeHeader || 'none'}`);
         if (rangeHeader) {
           const match = rangeHeader.match(/bytes=0-(\d+)/);
           if (match) {
             actualBytesUploaded = parseInt(match[1]) + 1;
-            console.log(`   ✅ Google Drive confirmed: ${Math.round(actualBytesUploaded / (1024 * 1024))} MB received`);
-            console.log(`   📤 Resuming upload from byte ${actualBytesUploaded}`);
+            logger.log(`   ✅ Google Drive confirmed: ${Math.round(actualBytesUploaded / (1024 * 1024))} MB received`);
+            logger.log(`   📤 Resuming upload from byte ${actualBytesUploaded}`);
           }
         } else {
-          console.log(`   ⚠️  No Range header, starting from saved position: ${Math.round(startBytes / (1024 * 1024))} MB`);
+          logger.log(`   ⚠️  No Range header, starting from saved position: ${Math.round(startBytes / (1024 * 1024))} MB`);
         }
       } else if (statusResponse.status === 200 || statusResponse.status === 201) {
         // Upload already complete!
         const file = await statusResponse.json() as GoogleDriveFile;
-        console.log(`   Status: ${statusResponse.status} - Upload already complete!`);
-        console.log(`   ✅ File ID: ${file.id}`);
-        console.log(`   🗑️  Removing from active-uploads.json`);
+        logger.log(`   Status: ${statusResponse.status} - Upload already complete!`);
+        logger.log(`   ✅ File ID: ${file.id}`);
+        logger.log(`   🗑️  Removing from active-uploads.json`);
         removeInterruptedUpload(videoPath);
 
         const progress = uploadProgress.get(finalUploadId);
@@ -1311,7 +1501,7 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       // Start background upload from where we left off
-      console.log(`📤 Starting background resume from byte ${actualBytesUploaded}...`);
+      logger.log(`📤 Starting background resume from byte ${actualBytesUploaded}...`);
       performBackgroundUpload(
         videoPath,
         uploadSessionUrl,
@@ -1322,7 +1512,7 @@ async function handleRequest(req: Request): Promise<Response> {
         uploadFilename,
         actualBytesUploaded  // Resume from this position
       ).catch((err) => {
-        console.error(`❌ Background resume error for ${filename}:`, err);
+        logger.error(`❌ Background resume error for ${filename}:`, err);
       });
 
       // Return immediately - upload continues in background
@@ -1336,9 +1526,9 @@ async function handleRequest(req: Request): Promise<Response> {
       const isCancelled = resumeError.message === 'Upload cancelled by client';
 
       if (isCancelled) {
-        console.log(`❌ Resume cancelled`);
+        logger.log(`❌ Resume cancelled`);
       } else {
-        console.error('Resume error:', resumeError);
+        logger.error('Resume error:', resumeError);
       }
 
       return new Response(JSON.stringify({
@@ -1520,12 +1710,12 @@ async function handleRequest(req: Request): Promise<Response> {
 
           if (videoFiles.length === 0) {
             shouldDeleteFolder = true;
-            console.log(`📁 No more videos in ${folderPath}, deleting folder...`);
+            logger.log(`📁 No more videos in ${folderPath}, deleting folder...`);
             await execAsync(`rm -rf "${folderPath}"`);
-            console.log(`✅ Folder deleted: ${folderPath}`);
+            logger.log(`✅ Folder deleted: ${folderPath}`);
           }
         } catch (error: any) {
-          console.error(`❌ Error deleting folder: ${error.message}`);
+          logger.error(`❌ Error deleting folder: ${error.message}`);
           folderError = error.message;
         }
 
@@ -1772,7 +1962,7 @@ async function handleRequest(req: Request): Promise<Response> {
       });
       emitProgress(finalUploadId);
 
-      console.log(`📤 Uploading ${filename} as ${uploadFilename} to ${studentGroup} folder (${formatFileSize(totalBytes)})...`);
+      logger.log(`📤 Uploading ${filename} as ${uploadFilename} to ${studentGroup} folder (${formatFileSize(totalBytes)})...`);
 
       // Get access token for direct API calls
       const accessToken = await oAuth2Client.getAccessToken();
@@ -1801,8 +1991,8 @@ async function handleRequest(req: Request): Promise<Response> {
         throw new Error('Failed to get upload URL');
       }
 
-      console.log(`📍 Got upload session URL, starting background upload...`);
-      console.log(`💾 Saving initial upload state to active-uploads.json (0 bytes uploaded)`);
+      logger.log(`📍 Got upload session URL, starting background upload...`);
+      logger.log(`💾 Saving initial upload state to active-uploads.json (0 bytes uploaded)`);
 
       // Save interrupted upload state (persistent across restarts)
       saveInterruptedUpload(videoPath, {
@@ -1814,11 +2004,11 @@ async function handleRequest(req: Request): Promise<Response> {
         date,
         interruptedAt: new Date().toISOString()
       });
-      console.log(`✅ Initial state saved to disk`);
+      logger.log(`✅ Initial state saved to disk`);
 
       // Start upload in background (don't await - return immediately)
       performBackgroundUpload(videoPath, uploadUrl, totalBytes, finalUploadId, studentGroup, date, uploadFilename).catch((err) => {
-        console.error(`❌ Background upload error for ${filename}:`, err);
+        logger.error(`❌ Background upload error for ${filename}:`, err);
       });
 
       // Return immediately - upload continues in background
@@ -1829,7 +2019,7 @@ async function handleRequest(req: Request): Promise<Response> {
       }), { headers });
 
     } catch (error: any) {
-      console.error('❌ Upload initialization error:', error);
+      logger.error('❌ Upload initialization error:', error);
       return new Response(JSON.stringify({
         success: false,
         error: error.message
@@ -1872,7 +2062,7 @@ async function handleRequest(req: Request): Promise<Response> {
       if (abortController) {
         abortController.abort();
       }
-      console.log(`⏸️  Upload pause requested for: ${videoPath.split('/').pop()}`);
+      logger.log(`⏸️  Upload pause requested for: ${videoPath.split('/').pop()}`);
 
       // Keep in interrupted uploads (can be resumed)
       // Note: The background upload will save state to active-uploads.json
@@ -1883,7 +2073,7 @@ async function handleRequest(req: Request): Promise<Response> {
       }), { headers });
 
     } catch (error: any) {
-      console.error('❌ Cancel upload error:', error);
+      logger.error('❌ Cancel upload error:', error);
       return new Response(JSON.stringify({
         success: false,
         error: error.message
@@ -1932,11 +2122,52 @@ async function handleRequest(req: Request): Promise<Response> {
   return new Response('Not Found', { status: 404 });
 }
 
+// Server startup banner
+logger.log(`\n⭐⭐⭐ SERVER STARTED - ${new Date().toLocaleString('et-EE', { timeZone: 'Europe/Tallinn' })} - Port ${PORT} - PID ${process.pid} ⭐⭐⭐\n`);
+
+// Kill zombie child processes from previous server run
+const pidFile = 'server.pid';
+try {
+  if (existsSync(pidFile)) {
+    const oldPid = readFileSync(pidFile, 'utf-8').trim();
+    logger.log(`📋 Found previous server PID: ${oldPid}`);
+
+    // Check if old process still exists
+    try {
+      await execAsync(`ps -p ${oldPid}`);
+      logger.log(`⚠️  Previous server process ${oldPid} is still running!`);
+    } catch {
+      // Old process is dead, but might have zombie children
+      try {
+        const { stdout } = await execAsync(`pgrep -P ${oldPid} | wc -l`);
+        const count = parseInt(stdout.trim());
+        if (count > 0) {
+          logger.log(`🧹 Killing ${count} zombie child processes from previous run (parent PID ${oldPid})...`);
+          await execAsync(`pkill -9 -P ${oldPid}`);
+          logger.log(`✅ Cleaned up zombie processes`);
+        }
+      } catch (error) {
+        // No child processes found
+      }
+    }
+  }
+} catch (error) {
+  logger.error('Error cleaning up old processes:', error);
+}
+
+// Write current PID to file
+try {
+  await Bun.write(pidFile, String(process.pid));
+  logger.log(`💾 Saved current PID ${process.pid} to ${pidFile}`);
+} catch (error) {
+  logger.error('Error writing PID file:', error);
+}
+
 // Clean up debug frames on server start
 const debugDir = join(__dirname, 'debug_frames');
 try {
   await execAsync(`rm -rf "${debugDir}"`);
-  console.log('🗑️  Cleared debug frames directory');
+  logger.log('🗑️  Cleared debug frames directory');
 } catch (error) {
   // Ignore if directory doesn't exist
 }
@@ -1948,5 +2179,162 @@ serve({
   idleTimeout: 255 // Maximum allowed by Bun (client has 10-minute timeout)
 });
 
-console.log(`🚀 Lecture Recording Dashboard running at http://localhost:${PORT}`);
-console.log(`📊 Open your browser to view the dashboard`);
+logger.log(`🚀 Lecture Recording Dashboard running at http://localhost:${PORT}`);
+logger.log(`📊 Open your browser to view the dashboard`);
+
+// Handle server shutdown gracefully
+process.on('SIGINT', async () => {
+  logger.log('\n⏹️  Server stopped by user (Ctrl+C)');
+
+  // Kill all child processes (including ffmpeg/ffprobe spawned by this server)
+  try {
+    const { stdout } = await execAsync(`pgrep -P ${process.pid} | wc -l`);
+    const count = parseInt(stdout.trim());
+    if (count > 0) {
+      logger.log(`🧹 Killing ${count} child processes...`);
+      await execAsync(`pkill -9 -P ${process.pid}`);
+      logger.log(`✅ Cleaned up child processes`);
+    }
+  } catch (error) {
+    // Ignore if no child processes
+  }
+
+  // Remove PID file (clean shutdown)
+  try {
+    if (existsSync(pidFile)) {
+      unlinkSync(pidFile);
+      logger.log(`🗑️  Removed PID file`);
+    }
+  } catch (error) {
+    // Ignore
+  }
+
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  logger.log('\n⏹️  Server stopped (SIGTERM)');
+
+  // Kill all child processes
+  try {
+    const { stdout } = await execAsync(`pgrep -P ${process.pid} | wc -l`);
+    const count = parseInt(stdout.trim());
+    if (count > 0) {
+      logger.log(`🧹 Killing ${count} child processes...`);
+      await execAsync(`pkill -9 -P ${process.pid}`);
+      logger.log(`✅ Cleaned up child processes`);
+    }
+  } catch (error) {
+    // Ignore
+  }
+
+  // Remove PID file (clean shutdown)
+  try {
+    if (existsSync(pidFile)) {
+      unlinkSync(pidFile);
+      logger.log(`🗑️  Removed PID file`);
+    }
+  } catch (error) {
+    // Ignore
+  }
+
+  process.exit(0);
+});
+
+// Background video scanning on server startup
+(async () => {
+  try {
+    logger.log('\n🎬 Starting background video scanning...');
+
+    // Load all recordings
+    const recordings = loadJSON('data/lecture_recordings.json') || [];
+
+    // Collect all video paths
+    const allVideoPaths: string[] = [];
+    recordings.forEach((rec: any) => {
+      if (rec.videos && rec.videos.length > 0) {
+        allVideoPaths.push(...rec.videos);
+      }
+    });
+
+    if (allVideoPaths.length === 0) {
+      logger.log('📹 No videos found to scan');
+      return;
+    }
+
+    logger.log(`📹 Found ${allVideoPaths.length} videos total`);
+
+    // Load existing cache
+    const videoMetadataCache = loadJSON('data/video-metadata-cache.json') || {};
+
+    // Check which videos need processing
+    const videosToProcess: string[] = [];
+    const cachedVideos: string[] = [];
+
+    for (const videoPath of allVideoPaths) {
+      const fileHash = await getFileHash(videoPath);
+      const cachedMetadata = videoMetadataCache[videoPath];
+
+      if (cachedMetadata && fileHash && cachedMetadata.hash === fileHash) {
+        cachedVideos.push(videoPath);
+      } else {
+        videosToProcess.push(videoPath);
+      }
+    }
+
+    logger.log(`✅ ${cachedVideos.length} videos already cached`);
+    logger.log(`🔄 ${videosToProcess.length} videos need processing`);
+
+    if (videosToProcess.length === 0) {
+      logger.log('✨ All videos are up to date!\n');
+      return;
+    }
+
+    // Process videos sequentially
+    let processed = 0;
+    for (const videoPath of videosToProcess) {
+      try {
+        processed++;
+        const filename = videoPath.split('/').pop() || '';
+        logger.log(`\n📹 [${processed}/${videosToProcess.length}] Processing: ${filename}`);
+
+        // Use the same logic as /api/video-metadata
+        const analysis = await analyzeVideo(videoPath);
+        const timestampData = await extractTimestampFromVideo(videoPath);
+        const fileSizeBytes = getFileSize(videoPath);
+        const fileSize = fileSizeBytes ? formatFileSize(fileSizeBytes) : '';
+
+        const videoData = {
+          path: videoPath,
+          filename,
+          isTimebolted: analysis.isTimebolted,
+          detectionMethod: analysis.detectionMethod,
+          recordingTime: timestampData?.timestamp || null,
+          endTimestamp: timestampData?.endTimestamp || '',
+          duration: timestampData?.duration || '',
+          fileSize,
+          fileSizeBytes
+        };
+
+        // Save to cache
+        const fileHash = await getFileHash(videoPath);
+        if (fileHash) {
+          videoMetadataCache[videoPath] = {
+            hash: fileHash,
+            cachedAt: new Date().toISOString(),
+            data: videoData
+          };
+          await Bun.write('data/video-metadata-cache.json', JSON.stringify(videoMetadataCache, null, 2));
+        }
+
+        logger.log(`✅ Processed: ${filename}`);
+      } catch (error) {
+        logger.error(`❌ Failed to process ${videoPath}:`, error);
+      }
+    }
+
+    logger.log(`\n✨ Background scanning complete! Processed ${processed}/${videosToProcess.length} videos\n`);
+  } catch (error) {
+    logger.error('❌ Background video scanning error:', error);
+  }
+})();
