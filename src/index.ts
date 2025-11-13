@@ -839,7 +839,7 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
                 // Verify frame was actually extracted
                 if (!existsSync(tempImagePath)) {
                   logger.log(`  End frame ${frameNum} ✗ FFmpeg failed to extract frame (seek beyond video end?)`);
-                  endResults.push({ frameNum, timestamp: null });
+                  endResults.push({ frameNum, endTime: null });
                   continue;
                 }
 
@@ -2280,9 +2280,16 @@ process.on('SIGTERM', async () => {
 
     for (const videoPath of allVideoPaths) {
       const fileHash = await getFileHash(videoPath);
+
+      // Skip files that don't exist (fileHash will be null)
+      if (!fileHash) {
+        logger.log(`⚠️  Skipping missing file: ${videoPath.split('/').pop()}`);
+        continue;
+      }
+
       const cachedMetadata = videoMetadataCache[videoPath];
 
-      if (cachedMetadata && fileHash && cachedMetadata.hash === fileHash) {
+      if (cachedMetadata && cachedMetadata.hash === fileHash) {
         cachedVideos.push(videoPath);
       } else {
         videosToProcess.push(videoPath);
@@ -2340,7 +2347,22 @@ process.on('SIGTERM', async () => {
       }
     }
 
-    logger.log(`\n✨ Background scanning complete! Processed ${processed}/${videosToProcess.length} videos\n`);
+    logger.log(`\n✨ Background scanning complete! Processed ${processed}/${videosToProcess.length} videos`);
+
+    // Clean up stale cache entries (files that no longer exist)
+    const validPaths = new Set(allVideoPaths);
+    const cachedPaths = Object.keys(videoMetadataCache);
+    const stalePaths = cachedPaths.filter(path => !validPaths.has(path));
+
+    if (stalePaths.length > 0) {
+      logger.log(`🧹 Removing ${stalePaths.length} stale cache entries...`);
+      for (const stalePath of stalePaths) {
+        delete videoMetadataCache[stalePath];
+      }
+      await Bun.write('data/video-metadata-cache.json', JSON.stringify(videoMetadataCache, null, 2));
+      logger.log('✅ Cache cleanup complete');
+    }
+    logger.log(''); // Empty line for formatting
   } catch (error) {
     logger.error('❌ Background video scanning error:', error);
   }
