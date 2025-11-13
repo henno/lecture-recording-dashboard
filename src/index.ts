@@ -322,9 +322,8 @@ async function performBackgroundUpload(
 
   try {
     // Step 2: Upload file in chunks with progress tracking
-    const CHUNK_SIZE = 256 * 1024; // 256KB chunks
-    const fileHandle = await Bun.file(videoPath);
-    const fileBuffer = await fileHandle.arrayBuffer();
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks (Google Drive recommended size)
+    const fileHandle = Bun.file(videoPath);
 
     let bytesUploaded = startFromByte;
     let lastEmittedPercent = -1;
@@ -360,7 +359,9 @@ async function performBackgroundUpload(
 
       const start = bytesUploaded;
       const end = Math.min(start + CHUNK_SIZE, totalBytes);
-      const chunk = fileBuffer.slice(start, end);
+
+      // Stream chunk from file instead of loading entire file into memory
+      const chunk = await fileHandle.slice(start, end).arrayBuffer();
 
       // Add 10-second timeout for network detection
       const timeoutId = setTimeout(() => abortController.abort(), 10000);
