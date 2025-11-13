@@ -1243,11 +1243,15 @@ async function syncWithDrive() {
     btn.textContent = '⏳ Syncing...';
 
     try {
+        console.log('🔄 Starting Google Drive sync...');
         const response = await fetch('/api/sync', { method: 'POST' });
         const result = await response.json();
+        console.log('Sync result:', result);
 
         if (result.success) {
-            loadData(); // Reload data
+            console.log('✅ Sync successful, reloading data...');
+            await loadData(); // Wait for data reload
+            console.log('✅ Data reloaded');
         } else {
             // Check for specific error types and provide helpful guidance
             if (result.error && result.error.includes('Missing credentials.json')) {
