@@ -1553,9 +1553,24 @@ async function handleRequest(req: Request): Promise<Response> {
   // API: Sync with Google Drive
   if (path === '/api/sync' && req.method === 'POST') {
     try {
-      const { stdout, stderr } = await execAsync('bun run sync');
+      logger.log('🔄 Starting Google Drive sync...');
+
+      // Create a promise that rejects after 2 minutes
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Sync timeout after 2 minutes')), 120000);
+      });
+
+      // Race between sync and timeout
+      const syncPromise = execAsync('bun run sync');
+      const { stdout, stderr } = await Promise.race([syncPromise, timeoutPromise]) as any;
+
+      logger.log('✅ Sync completed');
+      if (stderr) {
+        logger.log('Sync stderr:', stderr);
+      }
       return new Response(JSON.stringify({ success: true, output: stdout }), { headers });
     } catch (error: any) {
+      logger.error('❌ Sync failed:', error);
       return new Response(JSON.stringify({
         success: false,
         error: error.message
