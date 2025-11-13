@@ -540,8 +540,11 @@ async function getFileHash(filePath: string): Promise<string | null> {
     const buffer = await slice.arrayBuffer();
     const hash = Bun.hash.xxHash3(buffer);
     return hash.toString();
-  } catch (error) {
-    logger.error('Hash error:', error);
+  } catch (error: any) {
+    // Only log non-ENOENT errors (missing files are expected and handled)
+    if (error.code !== 'ENOENT') {
+      logger.error('Hash error:', error);
+    }
     return null;
   }
 }
