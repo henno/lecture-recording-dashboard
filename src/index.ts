@@ -836,6 +836,13 @@ async function extractTimestampFromVideo(videoPath: string): Promise<{ timestamp
                   `Extract end frame ${frameNum}: ${filename}`
                 );
 
+                // Verify frame was actually extracted
+                if (!existsSync(tempImagePath)) {
+                  logger.log(`  End frame ${frameNum} ✗ FFmpeg failed to extract frame (seek beyond video end?)`);
+                  endResults.push({ frameNum, timestamp: null });
+                  continue;
+                }
+
                 logger.log(`  Running OCR on end frame ${frameNum}...`);
                 const { stdout } = await execAsync(`tesseract "${tempImagePath}" stdout --psm 7`);
 
