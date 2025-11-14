@@ -410,6 +410,10 @@ async function performBackgroundUpload(
           });
         }
 
+        // Yield to event loop every chunk to prevent blocking other requests
+        // This allows sync, refresh, and other operations to run during upload
+        await new Promise(resolve => setImmediate(resolve));
+
         // Check if upload is complete
         if (chunkResponse.status === 200 || chunkResponse.status === 201) {
           const file = await chunkResponse.json() as GoogleDriveFile;
