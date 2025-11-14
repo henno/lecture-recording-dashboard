@@ -1143,6 +1143,7 @@ async function deleteVideo(videoPath) {
     let shouldRemoveFolder = false;
 
     recordings.forEach(rec => {
+        // Remove from all possible video array properties
         if (rec.videosWithStatus) {
             rec.videosWithStatus = rec.videosWithStatus.filter(v => v.path !== videoPath);
             // Check if this was the last video in the folder
@@ -1155,6 +1156,13 @@ async function deleteVideo(videoPath) {
         }
         if (rec.videos) {
             rec.videos = rec.videos.filter(v => v !== videoPath);
+        }
+        if (rec.videoPaths) {
+            rec.videoPaths = rec.videoPaths.filter(v => v !== videoPath);
+            // Check if this was the last video
+            if (rec.videoPaths.length === 0) {
+                shouldRemoveFolder = true;
+            }
         }
     });
 
