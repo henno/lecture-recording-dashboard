@@ -269,7 +269,21 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan, a
     const isMissing = !hasUploadedVideo && !hasLocalFolder;
     const isUploaded = allUploaded;
 
-    tr.className = isMissing ? 'missing' : (isUploaded ? 'uploaded' : 'not-uploaded');
+    // For the first row (which contains LOCAL VIDEOS cell), determine color based on ALL groups on this date
+    let rowStatus;
+    if (isFirstGroup && allDateRecordings) {
+        const anyMissing = allDateRecordings.some(r => {
+            const uploaded = r.uploaded === true;
+            const hasFolder = r.folder !== 'MISSING!';
+            return !uploaded && !hasFolder;
+        });
+        const allUploadedOnDate = allDateRecordings.every(r => r.uploaded === true);
+        rowStatus = anyMissing ? 'missing' : (allUploadedOnDate ? 'uploaded' : 'not-uploaded');
+    } else {
+        rowStatus = isMissing ? 'missing' : (isUploaded ? 'uploaded' : 'not-uploaded');
+    }
+
+    tr.className = rowStatus;
 
     // Time range - find a recording with valid times (some recordings might not have times)
     let timeRange = '-';
@@ -334,6 +348,7 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan, a
                 const highlightStyle = hasMatchingLocalSize ? 'background:yellow;color:black;font-weight:bold;' : '';
 
                 gdriveVideos.push({
+                    id: driveFile.id,
                     name: driveFile.name,
                     url: driveFile.url,
                     size: fileSizeText,
@@ -358,6 +373,9 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan, a
                         <span class="input-group-text" ${folderClickable}>📁 ${studentGroup}</span>
                         <input type="text" readonly class="form-control" value="☁️ ${video.name}" onclick="window.open('${video.url.replace(/'/g, "\\'")}', '_blank')" title="Click to open in Google Drive">
                         <span class="input-group-text" style="${video.highlight}">${video.size}</span>
+                    </div>
+                    <div class="action-buttons">
+                        <button class="btn-action btn-delete" onclick="deleteGDriveVideo('${video.id}', '${video.name.replace(/'/g, "\\'")}', '${studentGroup}', '${date}')">🗑️</button>
                     </div>
                 </div>
             `;
@@ -1175,9 +1193,18 @@ async function deleteVideo(videoPath) {
         }
     });
 
-    // If this was the last video, also remove the recording entry from DOM
+    // If this was the last video, mark folder as MISSING instead of removing the entry
+    // (so Google Drive videos can still be displayed if the recording is uploaded)
     if (shouldRemoveFolder) {
-        recordings = recordings.filter(rec => !rec.folder || !rec.folder.includes(folderPath.split('/').pop()));
+        recordings.forEach(rec => {
+            if (rec.folder && rec.folder.includes(folderPath.split('/').pop())) {
+                // Keep the recording entry but mark as missing (no local folder)
+                rec.folder = 'MISSING!';
+                rec.videos = [];
+                rec.videoPaths = [];
+                rec.videosWithStatus = [];
+            }
+        });
     }
 
     renderRecordings();
@@ -1206,6 +1233,80 @@ async function deleteVideo(videoPath) {
     } catch (error) {
         console.error('Error deleting video:', error);
         alert('Failed to delete video');
+        // Restore data on error
+        loadData();
+    }
+}
+
+// Show toast notification
+function showToast(message, type = 'success') {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+
+    const icon = type === 'success' ? '✓' : '✕';
+
+    toast.innerHTML = `
+        <span class="toast-icon">${icon}</span>
+        <span class="toast-message">${message}</span>
+        <button class="toast-close" onclick="this.parentElement.remove()">×</button>
+    `;
+
+    container.appendChild(toast);
+
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+        toast.style.animation = 'slideOut 0.3s ease-out';
+        setTimeout(() => toast.remove(), 300);
+    }, 5000);
+}
+
+// Delete Google Drive video
+async function deleteGDriveVideo(fileId, filename, studentGroup, date) {
+    if (!confirm(`Are you sure you want to delete this file from Google Drive?\n\n${filename}\n\nThis cannot be undone!`)) {
+        return;
+    }
+
+    // Optimistic update: remove from driveFiles and UI immediately
+    const driveKey = `${studentGroup}:${date}`;
+    if (driveFiles[driveKey]) {
+        if (Array.isArray(driveFiles[driveKey])) {
+            driveFiles[driveKey] = driveFiles[driveKey].filter(f => f.id !== fileId);
+            // If no more files for this key, remove the key
+            if (driveFiles[driveKey].length === 0) {
+                delete driveFiles[driveKey];
+            }
+        } else if (driveFiles[driveKey].id === fileId) {
+            delete driveFiles[driveKey];
+        }
+    }
+
+    renderRecordings();
+
+    // Call API in background
+    try {
+        const response = await fetch('/api/delete-gdrive-file', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ fileId, filename })
+        });
+
+        const result = await response.json();
+
+        if (!result.success) {
+            showToast(`Failed to delete from Google Drive: ${result.error}`, 'error');
+            // Restore data on error
+            loadData();
+        } else {
+            showToast(`Successfully deleted from Google Drive: ${filename}`, 'success');
+            // Reload data to ensure sync
+            await loadData();
+        }
+    } catch (error) {
+        console.error('Error deleting Google Drive file:', error);
+        showToast(`Failed to delete from Google Drive: ${error.message}`, 'error');
         // Restore data on error
         loadData();
     }

@@ -5,6 +5,7 @@ import { readFileSync, existsSync, unlinkSync, statSync, readdirSync, renameSync
 import { join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { google } from 'googleapis';
 
 const execAsync = promisify(exec);
 
@@ -1802,6 +1803,65 @@ async function handleRequest(req: Request): Promise<Response> {
       return new Response(JSON.stringify({
         success: false,
         error: error.message
+      }), { headers, status: 500 });
+    }
+  }
+
+  // API: Delete Google Drive file
+  if (path === '/api/delete-gdrive-file' && req.method === 'POST') {
+    try {
+      const body = await req.json();
+      const { fileId, filename } = body;
+
+      if (!fileId) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'File ID is required'
+        }), { headers, status: 400 });
+      }
+
+      logger.log(`🗑️  Deleting file from Google Drive: ${filename} (${fileId})`);
+
+      // Load OAuth credentials and token
+      const TOKEN_PATH = 'config/token.json';
+      const CREDENTIALS_PATH = 'config/credentials.json';
+
+      if (!existsSync(TOKEN_PATH) || !existsSync(CREDENTIALS_PATH)) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Google Drive not configured. Please authorize first.'
+        }), { headers, status: 400 });
+      }
+
+      const credentials = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf-8'));
+      const token = JSON.parse(readFileSync(TOKEN_PATH, 'utf-8'));
+
+      const { client_secret, client_id, redirect_uris } = credentials.installed;
+      const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+      oAuth2Client.setCredentials(token);
+
+      // Create Drive client
+      const drive = google.drive({ version: 'v3', auth: oAuth2Client });
+
+      // Delete the file
+      await drive.files.delete({ fileId });
+
+      logger.log(`✅ File deleted from Google Drive: ${filename}`);
+
+      // Sync to update drive-files.json
+      logger.log(`🔄 Running sync to update drive-files.json...`);
+      await execAsync('bun run sync');
+      logger.log(`✅ Sync completed`);
+
+      return new Response(JSON.stringify({
+        success: true
+      }), { headers });
+
+    } catch (error: any) {
+      logger.error(`❌ Error deleting Google Drive file:`, error);
+      return new Response(JSON.stringify({
+        success: false,
+        error: error.message || 'Unknown error'
       }), { headers, status: 500 });
     }
   }
