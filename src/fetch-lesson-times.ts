@@ -125,22 +125,42 @@ async function fetchLessonTimes() {
 
       // Create final recordings list with placeholders for missing recordings
       const matchingRecordings: Array<{ folder: string; date: string; studentGroup: string; videos?: string[]; uploaded?: boolean }> = [];
+      const processedFolders = new Set<string>();  // Track which folders we've already added
 
       for (const lesson of simplified) {
         const recordings = recordingsByDate.get(lesson.date);
 
         if (recordings && recordings.length > 0) {
-          // Add all recordings for this date
+          // For each recording folder, match videos to student group based on filename
           recordings.forEach(rec => {
-            matchingRecordings.push({
-              folder: rec.folder,
-              date: lesson.date,
-              studentGroup: lesson.studentGroup,
-              videos: rec.videos
+            // Extract student group from video filenames
+            const groupVideos = rec.videos.filter(videoPath => {
+              const filename = videoPath.split('/').pop() || '';
+              // Check if filename starts with this student group (e.g., "TAK24 -" or "TAK25 -")
+              return filename.startsWith(`${lesson.studentGroup} -`);
             });
+
+            // Only add entry if we found videos for this group OR if this is the only lesson for this date
+            const lessonsForThisDate = simplified.filter(l => l.date === lesson.date);
+            const shouldAddEntry = groupVideos.length > 0 || lessonsForThisDate.length === 1;
+
+            if (shouldAddEntry && !processedFolders.has(`${rec.folder}:${lesson.studentGroup}`)) {
+              processedFolders.add(`${rec.folder}:${lesson.studentGroup}`);
+              matchingRecordings.push({
+                folder: rec.folder,
+                date: lesson.date,
+                studentGroup: lesson.studentGroup,
+                videos: groupVideos.length > 0 ? groupVideos : rec.videos  // Use matched videos or all if only one lesson
+              });
+            }
           });
-        } else {
-          // Add placeholder for missing recording
+        }
+
+        // Add placeholder for missing recording only if we didn't find any videos for this group/date
+        const hasRecordingForThisLesson = matchingRecordings.some(
+          r => r.date === lesson.date && r.studentGroup === lesson.studentGroup && r.videos && r.videos.length > 0
+        );
+        if (!hasRecordingForThisLesson) {
           matchingRecordings.push({
             folder: "MISSING!",
             date: lesson.date,
