@@ -426,14 +426,17 @@ async function performBackgroundUpload(
             progress.bytesUploaded = totalBytes;
             progress.percent = 100;
             uploadProgress.set(uploadId, progress);
+
+            logger.log(`📢 Emitting completion status to ${progressListeners.get(uploadId)?.size || 0} listeners`);
             emitProgress(uploadId);
 
-            // Clean up after a delay
+            // Clean up after a longer delay to ensure frontend receives completion
             setTimeout(() => {
+              logger.log(`🧹 Cleaning up upload progress for ${filename}`);
               uploadProgress.delete(uploadId);
               progressListeners.delete(uploadId);
               uploadAbortControllers.delete(uploadId);
-            }, 5000);
+            }, 10000); // Increased from 5s to 10s
           }
 
           // Remove from interrupted uploads (no longer needs resume)
@@ -450,7 +453,17 @@ async function performBackgroundUpload(
           Bun.write('data/lecture_recordings.json', JSON.stringify(recordings, null, 2));
 
           // Sync with Drive to update drive-files.json
-          await execAsync('bun run sync');
+          try {
+            logger.log(`🔄 Running post-upload sync to update Drive files list...`);
+            const { stdout, stderr } = await execAsync('bun run sync');
+            logger.log(`✅ Post-upload sync completed`);
+            if (stderr) {
+              logger.log(`Sync stderr: ${stderr}`);
+            }
+          } catch (syncError: any) {
+            logger.error(`❌ Post-upload sync failed:`, syncError);
+            // Don't fail the upload - file is already on Drive, sync can be done manually
+          }
 
           return;
         }
