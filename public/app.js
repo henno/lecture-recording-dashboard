@@ -243,16 +243,19 @@ function renderRecordings() {
         const groupNames = Object.keys(groupsOnDate).sort();
         const rowspan = groupNames.length;
 
+        // Collect all recordings for this date (for LOCAL VIDEOS column)
+        const allDateRecordings = groupNames.flatMap(gn => groupsOnDate[gn]);
+
         groupNames.forEach((groupName, groupIndex) => {
             const groupRecordings = groupsOnDate[groupName];
-            const row = createGroupRecordingRow(groupRecordings, date, groupIndex === 0, rowspan);
+            const row = createGroupRecordingRow(groupRecordings, date, groupIndex === 0, rowspan, allDateRecordings);
             tbody.appendChild(row);
         });
     });
 }
 
 // Create group recording row (one row per group, date cell spans multiple rows if needed)
-function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
+function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan, allDateRecordings = null) {
     const tr = document.createElement('tr');
 
     // Use first recording for common fields
@@ -372,7 +375,10 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
     let hasAnyVideos = false;
     const emptyFolders = [];
 
-    groupRecordings.forEach(rec => {
+    // For LOCAL VIDEOS column (rowspanned), use all recordings for this date
+    const recordingsToProcess = (isFirstGroup && allDateRecordings) ? allDateRecordings : groupRecordings;
+
+    recordingsToProcess.forEach(rec => {
         if (rec.folder === 'MISSING!') {
             // Don't show anything for missing folders in merged view
             return;
@@ -437,7 +443,10 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan) {
         }
     });
 
-    if (isMissing) {
+    // For LOCAL VIDEOS column, check if ALL recordings for this date are missing
+    const localIsMissing = recordingsToProcess.every(r => r.folder === 'MISSING!');
+
+    if (localIsMissing) {
         localVideosHTML = '<em style="color:#999;">No recording found</em>';
     } else if (localVideos.length > 0) {
         localVideosHTML = '<div class="video-list">';
