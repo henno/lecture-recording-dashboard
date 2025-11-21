@@ -1191,46 +1191,54 @@ async function deleteVideo(videoPath) {
     }
 
     // Optimistic update: remove video from UI immediately
-    const folderPath = videoPath.substring(0, videoPath.lastIndexOf('/'));
-    let shouldRemoveFolder = false;
+    console.log('🗑️  Deleting video:', videoPath);
+
+    // Remove from videoMetadataCache
+    if (videoMetadataCache.has(videoPath)) {
+        videoMetadataCache.delete(videoPath);
+        console.log('  ✓ Removed from videoMetadataCache');
+    }
 
     recordings.forEach(rec => {
+        // Only process recordings that contain this specific video
+        const hasThisVideo =
+            (rec.videosWithStatus && rec.videosWithStatus.some(v => v.path === videoPath)) ||
+            (rec.videos && rec.videos.includes(videoPath)) ||
+            (rec.videoPaths && rec.videoPaths.includes(videoPath));
+
+        if (!hasThisVideo) {
+            return; // Skip this recording, it doesn't have the video we're deleting
+        }
+
+        console.log('  ✓ Removing from recording:', rec.folder);
+
         // Remove from all possible video array properties
         if (rec.videosWithStatus) {
             rec.videosWithStatus = rec.videosWithStatus.filter(v => v.path !== videoPath);
-            // Check if this was the last video in the folder
-            if (rec.folder && rec.folder.includes(folderPath.split('/').pop())) {
-                const remainingVideos = rec.videosWithStatus.filter(v => v.path.includes(folderPath));
-                if (remainingVideos.length === 0) {
-                    shouldRemoveFolder = true;
-                }
-            }
         }
         if (rec.videos) {
             rec.videos = rec.videos.filter(v => v !== videoPath);
         }
         if (rec.videoPaths) {
             rec.videoPaths = rec.videoPaths.filter(v => v !== videoPath);
-            // Check if this was the last video
-            if (rec.videoPaths.length === 0) {
-                shouldRemoveFolder = true;
-            }
+        }
+
+        // Check if this recording now has no videos left
+        const hasRemainingVideos =
+            (rec.videosWithStatus && rec.videosWithStatus.length > 0) ||
+            (rec.videos && rec.videos.length > 0) ||
+            (rec.videoPaths && rec.videoPaths.length > 0);
+
+        if (!hasRemainingVideos && rec.folder !== 'MISSING!') {
+            // This was the last video in this specific recording
+            // Mark it as MISSING so GDrive videos can still be displayed
+            console.log('  ℹ️  Last video removed, marking as MISSING:', rec.folder);
+            rec.folder = 'MISSING!';
+            rec.videos = [];
+            rec.videoPaths = [];
+            rec.videosWithStatus = [];
         }
     });
-
-    // If this was the last video, mark folder as MISSING instead of removing the entry
-    // (so Google Drive videos can still be displayed if the recording is uploaded)
-    if (shouldRemoveFolder) {
-        recordings.forEach(rec => {
-            if (rec.folder && rec.folder.includes(folderPath.split('/').pop())) {
-                // Keep the recording entry but mark as missing (no local folder)
-                rec.folder = 'MISSING!';
-                rec.videos = [];
-                rec.videoPaths = [];
-                rec.videosWithStatus = [];
-            }
-        });
-    }
 
     renderRecordings();
 
