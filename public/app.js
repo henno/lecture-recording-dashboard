@@ -1110,22 +1110,47 @@ async function renameVideo(videoPath, studentGroup, date) {
     const newPath = `${folderPath}/${newFilename}`;
 
     // Optimistic update: rename video in UI immediately
+    console.log('🔄 Renaming video:', videoPath, '→', newPath);
     recordings.forEach(rec => {
         if (rec.videosWithStatus) {
             rec.videosWithStatus.forEach(v => {
                 if (v.path === videoPath) {
+                    console.log('  ✓ Updated videosWithStatus:', v.filename, '→', newFilename);
                     v.path = newPath;
                     v.filename = newFilename;
                 }
             });
         }
+        if (rec.videoPaths) {
+            const index = rec.videoPaths.indexOf(videoPath);
+            if (index !== -1) {
+                console.log('  ✓ Updated rec.videoPaths at index', index);
+                rec.videoPaths[index] = newPath;
+            }
+        }
         if (rec.videos) {
             const index = rec.videos.indexOf(videoPath);
             if (index !== -1) {
+                console.log('  ✓ Updated rec.videos at index', index);
                 rec.videos[index] = newPath;
             }
         }
     });
+
+    // Update video metadata cache with new path
+    if (videoMetadataCache.has(videoPath)) {
+        const metadata = videoMetadataCache.get(videoPath);
+        videoMetadataCache.delete(videoPath);
+        // Update the metadata object's path and filename
+        metadata.path = newPath;
+        metadata.filename = newFilename;
+        videoMetadataCache.set(newPath, metadata);
+        console.log('  ✓ Updated videoMetadataCache');
+    } else {
+        console.log('  ⚠️  Video not found in metadata cache:', videoPath);
+    }
+
+    console.log('🎨 Calling renderRecordings()...');
     renderRecordings();
 
     // Call API in background

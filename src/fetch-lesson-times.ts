@@ -140,9 +140,50 @@ async function fetchLessonTimes() {
               return filename.startsWith(`${lesson.studentGroup} -`);
             });
 
-            // Only add entry if we found videos for this group OR if this is the only lesson for this date
+            // Get all lessons for this date
             const lessonsForThisDate = simplified.filter(l => l.date === lesson.date);
-            const shouldAddEntry = groupVideos.length > 0 || lessonsForThisDate.length === 1;
+
+            // Determine if we should add this entry
+            let shouldAddEntry = false;
+            let videosToUse = groupVideos;
+
+            if (groupVideos.length > 0) {
+              // Found videos matching this group
+              shouldAddEntry = true;
+            } else if (lessonsForThisDate.length === 1) {
+              // Only one lesson this date, assign all videos to it
+              shouldAddEntry = true;
+              videosToUse = rec.videos;
+            } else {
+              // Multiple lessons this date, no group-matched videos
+              // Try to match by recording time from folder name
+              // Folder format: "YYYY-MM-DD HH.MM.SS ..."
+              const timeMatch = rec.folder.match(/\d{4}-\d{2}-\d{2}\s+(\d{2})\.(\d{2})\./);
+              if (timeMatch) {
+                const recordingHour = parseInt(timeMatch[1]);
+                const recordingMinute = parseInt(timeMatch[2]);
+                const recordingTime = recordingHour * 60 + recordingMinute;
+
+                // Find the lesson with the closest start time to the recording time
+                // Allow matching up to 30 minutes before the lesson starts
+                const lessonsWithTimes = lessonsForThisDate.map(l => {
+                  const [h, m] = l.start.split(':').map(Number);
+                  const startTime = h * 60 + m;
+                  const timeDiff = Math.abs(startTime - recordingTime);
+                  return { lesson: l, startTime, timeDiff };
+                });
+
+                // Find the closest lesson
+                const closestLesson = lessonsWithTimes
+                  .filter(l => recordingTime >= l.startTime - 30) // Allow 30 min before lesson
+                  .sort((a, b) => a.timeDiff - b.timeDiff)[0]; // Sort by absolute time difference
+
+                if (closestLesson && closestLesson.lesson.studentGroup === lesson.studentGroup) {
+                  shouldAddEntry = true;
+                  videosToUse = rec.videos;
+                }
+              }
+            }
 
             if (shouldAddEntry && !processedFolders.has(`${rec.folder}:${lesson.studentGroup}`)) {
               processedFolders.add(`${rec.folder}:${lesson.studentGroup}`);
@@ -150,7 +191,7 @@ async function fetchLessonTimes() {
                 folder: rec.folder,
                 date: lesson.date,
                 studentGroup: lesson.studentGroup,
-                videos: groupVideos.length > 0 ? groupVideos : rec.videos  // Use matched videos or all if only one lesson
+                videos: videosToUse
               });
             }
           });
