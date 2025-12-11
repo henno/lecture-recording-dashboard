@@ -37,8 +37,10 @@ async function fetchLessonTimes() {
     const data = await response.json() as ApiResponse;
 
     // Filter out entries with empty studentGroups array (not actual lessons)
+    // Also filter out events with many groups (school-wide events like meetings)
     const lessonTimes = data.content
       .filter(lesson => lesson.studentGroups && lesson.studentGroups.length > 0)
+      .filter(lesson => lesson.studentGroups.length <= 3) // Exclude school-wide events
       .map(lesson => ({
         date: lesson.date.split("T")[0],
         start: lesson.timeStart,
