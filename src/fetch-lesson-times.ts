@@ -92,8 +92,8 @@ async function fetchLessonTimes() {
       const entries = await readdir(zoomDir);
 
       for (const entry of entries) {
-        // Check if entry starts with "2025-"
-        if (entry.startsWith("2025-")) {
+        // Check if entry starts with a date pattern (YYYY-MM-DD)
+        if (/^\d{4}-\d{2}-\d{2}/.test(entry)) {
           const fullPath = join(zoomDir, entry);
           const stats = await stat(fullPath);
 
