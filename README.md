@@ -78,13 +78,14 @@ bun install
      }
      ```
 
-### Optional shared upload folder
+### Optional upload folders
 
-To upload new recordings for all study groups to one Drive folder, copy
-`config/upload-destination.json.example` to `config/upload-destination.json` and
-set `folderId` to the destination folder ID. Without this file, uploads use the
-study group folders. Sync checks both the study group folders and the shared
-folder; files in the shared folder must start with the group name and ` - `.
+Copy `config/upload-destination.json.example` to `config/upload-destination.json`
+and set `groupFolders` to the Drive folder ID for each study group. Uploads go
+to the matching group folder. The optional `folderId` identifies a former shared
+folder: sync includes its files when their names start with the group name and
+` - `. Sync also checks the original study group folders. Without this file,
+uploads use the original study group folders.
 
 ## Project Setup
 

@@ -1,3 +1,7 @@
 {
-  "folderId": "YOUR_DRIVE_FOLDER_ID"
+  "folderId": "FORMER_SHARED_FOLDER_ID",
+  "groupFolders": {
+    "TAK24": "TAK24_FOLDER_ID",
+    "TAK25": "TAK25_FOLDER_ID"
+  }
 }

@@ -2040,9 +2040,11 @@ async function handleRequest(req: Request): Promise<Response> {
 
       const uploadDestinationPath = 'config/upload-destination.json';
       const uploadDestination = existsSync(uploadDestinationPath)
-        ? JSON.parse(readFileSync(uploadDestinationPath, 'utf-8')).folderId
+        ? JSON.parse(readFileSync(uploadDestinationPath, 'utf-8'))
         : undefined;
-      const folderId = uploadDestination || FOLDERS[studentGroup];
+      const folderId = uploadDestination?.groupFolders
+        ? uploadDestination.groupFolders[studentGroup]
+        : uploadDestination?.folderId || FOLDERS[studentGroup];
       if (!FOLDERS[studentGroup] || !folderId) {
         return new Response(JSON.stringify({
           success: false,
