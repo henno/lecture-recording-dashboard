@@ -78,6 +78,14 @@ bun install
      }
      ```
 
+### Optional shared upload folder
+
+To upload new recordings for all study groups to one Drive folder, copy
+`config/upload-destination.json.example` to `config/upload-destination.json` and
+set `folderId` to the destination folder ID. Without this file, uploads use the
+study group folders. Sync checks both the study group folders and the shared
+folder; files in the shared folder must start with the group name and ` - `.
+
 ## Project Setup
 
 1. **Fetch lesson times and scan recordings**

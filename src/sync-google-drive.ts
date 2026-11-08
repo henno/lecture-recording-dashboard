@@ -113,10 +113,19 @@ async function main() {
     const uploadedDates: { [key: string]: string[] } = {};
     const driveFiles: { [key: string]: Array<{ id: string, name: string, url: string, size: number }> } = {};
 
+    const destinationPath = 'config/upload-destination.json';
+    const destinationId = existsSync(destinationPath)
+      ? JSON.parse(readFileSync(destinationPath, 'utf-8')).folderId
+      : undefined;
+    const sharedFiles = destinationId ? await listFilesInFolder(auth, destinationId) : [];
+
     for (const [group, folderId] of Object.entries(FOLDERS)) {
       console.log(`\n📂 Checking ${group} folder...`);
 
-      const files = await listFilesInFolder(auth, folderId);
+      const groupFiles = folderId === destinationId ? [] : await listFilesInFolder(auth, folderId);
+      const files = [...groupFiles, ...sharedFiles.filter(file =>
+        (file.name || '').startsWith(`${group} - `)
+      )];
       const dates = new Set<string>();
 
       files.forEach((file) => {

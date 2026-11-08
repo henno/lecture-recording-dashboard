@@ -2038,8 +2038,12 @@ async function handleRequest(req: Request): Promise<Response> {
       // Determine target folder based on student group extracted from filename
       const FOLDERS = loadStudyGroups();
 
-      const folderId = FOLDERS[studentGroup];
-      if (!folderId) {
+      const uploadDestinationPath = 'config/upload-destination.json';
+      const uploadDestination = existsSync(uploadDestinationPath)
+        ? JSON.parse(readFileSync(uploadDestinationPath, 'utf-8')).folderId
+        : undefined;
+      const folderId = uploadDestination || FOLDERS[studentGroup];
+      if (!FOLDERS[studentGroup] || !folderId) {
         return new Response(JSON.stringify({
           success: false,
           error: `Unknown student group: ${studentGroup}`
