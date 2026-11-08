@@ -6,6 +6,7 @@ let filters = {
     missing: true,
     notUploaded: true,
     uploaded: true,
+    orphan: true,
     group: ''
 };
 
@@ -208,16 +209,18 @@ function renderRecordings() {
 
     // Filter recordings
     const filteredRecordings = recordings.filter(rec => {
+        const isOrphan = rec.studentGroup === 'ORPHAN';
         const isMissing = rec.folder === 'MISSING!';
         const isUploaded = rec.uploaded === true;
-        const isNotUploaded = !isMissing && !isUploaded;
+        const isNotUploaded = !isMissing && !isUploaded && !isOrphan;
 
+        if (isOrphan && !filters.orphan) return false;
         if (isMissing && !filters.missing) return false;
         if (isNotUploaded && !filters.notUploaded) return false;
         if (isUploaded && !filters.uploaded) return false;
-        return !(filters.group && rec.studentGroup !== filters.group);
-
-
+        // When a specific group is selected, hide orphans (they don't belong to any group)
+        if (filters.group && rec.studentGroup !== filters.group) return false;
+        return true;
     });
 
     // Sort: purely chronological by date
@@ -261,6 +264,7 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan, a
     // Use first recording for common fields
     const firstRec = groupRecordings[0];
     const studentGroup = firstRec.studentGroup;
+    const isOrphan = studentGroup === 'ORPHAN';
 
     // Determine overall status for this group
     const hasUploadedVideo = groupRecordings.some(r => r.uploaded === true);
@@ -271,7 +275,9 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan, a
 
     // For the first row (which contains LOCAL VIDEOS cell), determine color based on ALL groups on this date
     let rowStatus;
-    if (isFirstGroup && allDateRecordings) {
+    if (isOrphan) {
+        rowStatus = 'orphan';
+    } else if (isFirstGroup && allDateRecordings) {
         const anyMissing = allDateRecordings.some(r => {
             const uploaded = r.uploaded === true;
             const hasFolder = r.folder !== 'MISSING!';
@@ -547,8 +553,11 @@ function createGroupRecordingRow(groupRecordings, date, isFirstGroup, rowspan, a
         rowHTML += `<td style="max-width:600px;" rowspan="${rowspan}">${localVideosHTML}</td>`;
     }
 
+    const groupBadgeClass = isOrphan ? 'orphan' : 'group';
+    const groupBadgeText = isOrphan ? 'ORPHAN' : studentGroup;
+
     rowHTML += `
-        <td><span class="badge group">${studentGroup}</span></td>
+        <td><span class="badge ${groupBadgeClass}">${groupBadgeText}</span></td>
         <td style="white-space:nowrap;font-size:0.75rem;">${timeRange}</td>
         <td style="display:none;">${statusBadge}</td>
         <td style="max-width:300px;">${gdriveVideosHTML}</td>
@@ -564,8 +573,10 @@ function populateGroupFilter() {
     const filterSelect = document.getElementById('filter-group');
     const currentValue = filterSelect.value; // Preserve current selection
 
-    // Extract unique student groups from recordings
-    const uniqueGroups = [...new Set(recordings.map(rec => rec.studentGroup))].sort();
+    // Extract unique student groups from recordings (exclude ORPHAN)
+    const uniqueGroups = [...new Set(recordings.map(rec => rec.studentGroup))]
+        .filter(group => group !== 'ORPHAN')
+        .sort();
 
     // Keep "All" option and rebuild the rest
     filterSelect.innerHTML = '<option value="">All</option>';
@@ -598,26 +609,38 @@ function updateSummary() {
     let missing = 0;
     let notUploaded = 0;
     let uploaded = 0;
+    let orphan = 0;
 
     Object.values(groupedByDate).forEach(dateRecordings => {
-        // Use same logic as createMergedRecordingRow
-        const hasUploadedVideo = dateRecordings.some(r => r.uploaded === true);
-        const hasLocalFolder = dateRecordings.some(r => r.folder !== 'MISSING!');
-        const allUploaded = dateRecordings.every(r => r.uploaded === true);
-        const isMissing = !hasUploadedVideo && !hasLocalFolder;
+        // Separate orphan recordings from regular ones
+        const orphanRecs = dateRecordings.filter(r => r.studentGroup === 'ORPHAN');
+        const regularRecs = dateRecordings.filter(r => r.studentGroup !== 'ORPHAN');
 
-        if (isMissing) {
-            missing++;
-        } else if (allUploaded) {
-            uploaded++;
-        } else {
-            notUploaded++;
+        // Count orphan recordings
+        orphan += orphanRecs.length;
+
+        // Only process regular recordings for other counts
+        if (regularRecs.length > 0) {
+            // Use same logic as createMergedRecordingRow
+            const hasUploadedVideo = regularRecs.some(r => r.uploaded === true);
+            const hasLocalFolder = regularRecs.some(r => r.folder !== 'MISSING!');
+            const allUploaded = regularRecs.every(r => r.uploaded === true);
+            const isMissing = !hasUploadedVideo && !hasLocalFolder;
+
+            if (isMissing) {
+                missing++;
+            } else if (allUploaded) {
+                uploaded++;
+            } else {
+                notUploaded++;
+            }
         }
     });
 
     document.getElementById('count-missing').textContent = missing;
     document.getElementById('count-not-uploaded').textContent = notUploaded;
     document.getElementById('count-uploaded').textContent = uploaded;
+    document.getElementById('count-orphan').textContent = orphan;
 }
 
 // Open in Finder
@@ -1531,6 +1554,11 @@ document.getElementById('filter-not-uploaded').addEventListener('change', (e) =>
 
 document.getElementById('filter-uploaded').addEventListener('change', (e) => {
     filters.uploaded = e.target.checked;
+    renderRecordings();
+});
+
+document.getElementById('filter-orphan').addEventListener('change', (e) => {
+    filters.orphan = e.target.checked;
     renderRecordings();
 });
 

@@ -88,6 +88,9 @@ async function fetchLessonTimes() {
     const dateToGroupMap = new Map(simplified.map(s => [s.date, s.studentGroup]));
     const recordingsByDate = new Map<string, Array<{ folder: string; videos: string[] }>>();
 
+    // Track orphan recordings (videos on non-lesson days)
+    const orphanRecordings: Array<{ folder: string; date: string; videos: string[] }> = [];
+
     try {
       const entries = await readdir(zoomDir);
 
@@ -101,23 +104,31 @@ async function fetchLessonTimes() {
             // Extract date from folder name (first 10 characters: YYYY-MM-DD)
             const folderDate = entry.substring(0, 10);
 
-            if (lessonDates.has(folderDate)) {
-              // Scan for video files in this folder
-              const files = await readdir(fullPath);
-              const videoFiles = files
-                .filter(f =>
-                  f.endsWith(".mp4") ||
-                  f.endsWith(".mkv") ||
-                  f.endsWith(".avi") ||
-                  f.endsWith(".mov")
-                )
-                .map(f => join(fullPath, f));
+            // Scan for video files in this folder
+            const files = await readdir(fullPath);
+            const videoFiles = files
+              .filter(f =>
+                f.endsWith(".mp4") ||
+                f.endsWith(".mkv") ||
+                f.endsWith(".avi") ||
+                f.endsWith(".mov")
+              )
+              .map(f => join(fullPath, f));
 
+            if (lessonDates.has(folderDate)) {
+              // Regular lesson day recording
               if (!recordingsByDate.has(folderDate)) {
                 recordingsByDate.set(folderDate, []);
               }
               recordingsByDate.get(folderDate)!.push({
                 folder: entry,
+                videos: videoFiles
+              });
+            } else if (videoFiles.length > 0) {
+              // Orphan recording - videos on non-lesson day
+              orphanRecordings.push({
+                folder: entry,
+                date: folderDate,
                 videos: videoFiles
               });
             }
@@ -227,11 +238,21 @@ async function fetchLessonTimes() {
         recording.uploaded = groupUploads.includes(recording.date);
       });
 
+      // Add orphan recordings (videos on non-lesson days)
+      orphanRecordings.forEach(orphan => {
+        matchingRecordings.push({
+          folder: orphan.folder,
+          date: orphan.date,
+          studentGroup: "ORPHAN",
+          videos: orphan.videos
+        });
+      });
+
       // Sort recordings by date chronologically
       matchingRecordings.sort((a, b) => a.date.localeCompare(b.date));
 
       await Bun.write("data/lecture_recordings.json", JSON.stringify(matchingRecordings, null, 2));
-      console.log(`Successfully saved ${matchingRecordings.length} matching lecture recordings to lecture_recordings.json`);
+      console.log(`Successfully saved ${matchingRecordings.length} matching lecture recordings to lecture_recordings.json (${orphanRecordings.length} orphan)`);
     } catch (error) {
       console.error("Error scanning Zoom folders:", error);
     }

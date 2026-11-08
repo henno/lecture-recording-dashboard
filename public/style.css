@@ -177,6 +177,10 @@ h1 {
     border-left-color: #34c759;
 }
 
+.summary-card.orphan {
+    border-left-color: #007AFF;
+}
+
 .summary-count {
     font-size: 1.2rem;
     font-weight: 700;
@@ -265,6 +269,15 @@ tr.uploaded td {
     border-right: 1px solid #b8d9b8;
 }
 
+tr.orphan {
+    background: #e0edff;
+}
+
+tr.orphan td {
+    border-bottom: 1px solid #b8c8e8;
+    border-right: 1px solid #b8c8e8;
+}
+
 tr:hover {
     filter: brightness(0.95);
 }
@@ -291,6 +304,11 @@ tr:hover {
 
 .badge.group {
     background: #0071e3;
+    color: white;
+}
+
+.badge.orphan {
+    background: #007AFF;
     color: white;
 }
 
