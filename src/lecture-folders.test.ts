@@ -22,3 +22,16 @@ test('matching video reuses ID and changed or duplicate video is preserved',asyn
  await expect(findExistingVideo(drive([file]),'target',file.name,3,'other')).rejects.toThrow();
  await expect(findExistingVideo(drive([file,file]),'target',file.name,3,'hash')).rejects.toThrow();
 });
+
+test('read local media hash and verify final class access before completion',async()=>{
+ const {localVideoMd5,verifyLectureVideo}=await import('./lecture-folders');
+ const path=import.meta.dir+'/../.test-video-hash';
+ await Bun.write(path,'abc');
+ try {expect(await localVideoMd5(path)).toBe('900150983cd24fb0d6963f7d28e17f72');}
+ finally {await Bun.file(path).delete();}
+ const video={id:'video',mimeType:'video/mp4',trashed:false,parents:['target'],size:'3',md5Checksum:'hash',permissions:folder.permissions};
+ const api:any={files:{get:async({fileId}:any)=>({data:fileId==='target'?folder:video})}};
+ await verifyLectureVideo(api,config,'TAK25','video','target',3,'hash');
+ video.permissions=[];
+ await expect(verifyLectureVideo(api,config,'TAK25','video','target',3,'hash')).rejects.toThrow();
+});

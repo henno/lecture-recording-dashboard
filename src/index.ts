@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
-import {resolveLectureFolder,findExistingVideo} from './lecture-folders';
-import {createHash} from 'node:crypto';
+import {resolveLectureFolder,findExistingVideo,localVideoMd5,verifyLectureVideo} from './lecture-folders';
 
 import { serve } from 'bun';
 import { readFileSync, existsSync, unlinkSync, statSync, readdirSync, renameSync, appendFileSync } from 'fs';
@@ -307,6 +306,16 @@ function removeInterruptedUpload(videoPath: string) {
   Bun.write('data/active-uploads.json', JSON.stringify(uploads, null, 2));
 }
 
+async function checkUploadedLectureVideo(videoPath:string,studentGroup:string,fileId:string,totalBytes:number):Promise<void> {
+  const destination=loadJSON('config/upload-destination.json');
+  const credentials=JSON.parse(readFileSync('config/credentials.json','utf-8')).installed;
+  const auth=new google.auth.OAuth2(credentials.client_id,credentials.client_secret,credentials.redirect_uris[0]);
+  auth.setCredentials(JSON.parse(readFileSync('config/token.json','utf-8')));
+  const drive=google.drive({version:'v3',auth});
+  const folderId=await resolveLectureFolder(drive,destination,studentGroup);
+  await verifyLectureVideo(drive,destination,studentGroup,fileId,folderId,totalBytes,await localVideoMd5(videoPath));
+}
+
 // Background upload function that continues independently of HTTP request
 async function performBackgroundUpload(
   videoPath: string,
@@ -421,6 +430,7 @@ async function performBackgroundUpload(
         // Check if upload is complete
         if (chunkResponse.status === 200 || chunkResponse.status === 201) {
           const file = await chunkResponse.json() as GoogleDriveFile;
+          await checkUploadedLectureVideo(videoPath, studentGroup, file.id, totalBytes);
           logger.log(`✅ Upload complete! File ID: ${file.id}`);
 
           // Ensure final 100% is emitted
@@ -1515,6 +1525,7 @@ async function handleRequest(req: Request): Promise<Response> {
       } else if (statusResponse.status === 200 || statusResponse.status === 201) {
         // Upload already complete!
         const file = await statusResponse.json() as GoogleDriveFile;
+        await checkUploadedLectureVideo(videoPath, studentGroup, file.id, bytesTotal);
         logger.log(`   Status: ${statusResponse.status} - Upload already complete!`);
         logger.log(`   ✅ File ID: ${file.id}`);
         logger.log(`   🗑️  Removing from active-uploads.json`);
@@ -2059,10 +2070,13 @@ async function handleRequest(req: Request): Promise<Response> {
       const fileStats = statSync(videoPath);
       const totalBytes = fileStats.size;
 
-      const hash = createHash('md5');
-      for await (const chunk of createReadStream(videoPath)) hash.update(chunk);
-      const existingId = await findExistingVideo(drive, folderId, uploadFilename, totalBytes, hash.digest('hex'));
+      const digest = await localVideoMd5(videoPath);
+      const existingId = await findExistingVideo(drive, folderId, uploadFilename, totalBytes, digest);
       if (existingId) {
+        await verifyLectureVideo(drive, uploadDestination, studentGroup, existingId, folderId, totalBytes, digest);
+        uploadProgress.set(finalUploadId, {uploadId:finalUploadId,filename,videoPath,bytesUploaded:totalBytes,
+          bytesTotal:totalBytes,percent:100,status:'complete'});
+        emitProgress(finalUploadId);
         return new Response(JSON.stringify({success:true,fileId:existingId,reused:true}), {headers});
       }
 

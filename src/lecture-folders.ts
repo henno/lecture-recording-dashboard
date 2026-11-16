@@ -1,3 +1,5 @@
+import {createReadStream} from 'node:fs';
+import {createHash} from 'node:crypto';
 import type {drive_v3} from 'googleapis';
 export interface LectureDestination {
   rootFolderId: string;
@@ -37,4 +39,19 @@ export async function findExistingVideo(drive:drive_v3.Drive,folder:string,name:
   if(files.length!==1||files[0]!.mimeType!=='video/mp4'||Number(files[0]!.size)!==size||files[0]!.md5Checksum!==md5)
     throw Error('An existing lecture video conflicts; it was preserved');
   return files[0]!.id||undefined;
+}
+
+export async function localVideoMd5(path:string):Promise<string> {
+  const hash=createHash('md5');
+  for await(const chunk of createReadStream(path))hash.update(chunk);
+  return hash.digest('hex');
+}
+export async function verifyLectureVideo(drive:drive_v3.Drive,config:LectureDestination,group:string,fileId:string,folderId:string,size:number,md5:string):Promise<void> {
+  const {data:file}=await drive.files.get({fileId,fields:'id,mimeType,trashed,parents,size,md5Checksum,permissions(id,type,role,view)'});
+  const permissions=file.permissions||[],expected=config.groupPermissions[group];
+  if(!expected?.length||file.id!==fileId||file.mimeType!=='video/mp4'||file.trashed!==false||
+     !file.parents?.includes(folderId)||Number(file.size)!==size||file.md5Checksum!==md5||
+     expected.some(id=>!permissions.some(p=>p.id===id&&p.type==='group'&&p.view!=='metadata'&&['reader','commenter','writer','owner'].includes(p.role||'')))||
+     permissions.some(p=>p.type==='anyone'&&p.view!=='metadata'))
+    throw Error('The uploaded lecture video failed its hash, folder or class access check');
 }
