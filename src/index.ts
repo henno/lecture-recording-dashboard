@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {resolveLectureFolder,findExistingVideo,localVideoMd5,verifyLectureVideo} from './lecture-folders';
 
 import { serve } from 'bun';
 import { readFileSync, existsSync, unlinkSync, statSync, readdirSync, renameSync, appendFileSync } from 'fs';
@@ -273,6 +274,7 @@ const uploadAbortControllers = new Map<string, AbortController>(); // Track Abor
 interface InterruptedUpload {
   videoPath: string;
   uploadSessionUrl: string;
+  folderId?: string;
   bytesUploaded: number;
   bytesTotal: number;
   studentGroup: string;
@@ -293,7 +295,7 @@ function loadInterruptedUploads(): Record<string, InterruptedUpload> {
 // Save interrupted upload state
 function saveInterruptedUpload(videoPath: string, state: InterruptedUpload) {
   const uploads = loadInterruptedUploads();
-  uploads[videoPath] = state;
+  uploads[videoPath] = {...uploads[videoPath], ...state};
   Bun.write('data/active-uploads.json', JSON.stringify(uploads, null, 2));
 }
 
@@ -302,6 +304,16 @@ function removeInterruptedUpload(videoPath: string) {
   const uploads = loadInterruptedUploads();
   delete uploads[videoPath];
   Bun.write('data/active-uploads.json', JSON.stringify(uploads, null, 2));
+}
+
+async function checkUploadedLectureVideo(videoPath:string,studentGroup:string,fileId:string,totalBytes:number):Promise<void> {
+  const destination=loadJSON('config/upload-destination.json');
+  const credentials=JSON.parse(readFileSync('config/credentials.json','utf-8')).installed;
+  const auth=new google.auth.OAuth2(credentials.client_id,credentials.client_secret,credentials.redirect_uris[0]);
+  auth.setCredentials(JSON.parse(readFileSync('config/token.json','utf-8')));
+  const drive=google.drive({version:'v3',auth});
+  const folderId=await resolveLectureFolder(drive,destination,studentGroup);
+  await verifyLectureVideo(drive,destination,studentGroup,fileId,folderId,totalBytes,await localVideoMd5(videoPath));
 }
 
 // Background upload function that continues independently of HTTP request
@@ -418,6 +430,7 @@ async function performBackgroundUpload(
         // Check if upload is complete
         if (chunkResponse.status === 200 || chunkResponse.status === 201) {
           const file = await chunkResponse.json() as GoogleDriveFile;
+          await checkUploadedLectureVideo(videoPath, studentGroup, file.id, totalBytes);
           logger.log(`✅ Upload complete! File ID: ${file.id}`);
 
           // Ensure final 100% is emitted
@@ -1409,7 +1422,6 @@ async function handleRequest(req: Request): Promise<Response> {
       logger.log(`▶️  RESUME REQUEST: ${filename}`);
       logger.log(`   📁 Video: ${videoPath}`);
       logger.log(`   📊 Saved state: ${Math.round(uploadState.bytesUploaded / (1024 * 1024))} MB / ${Math.round(uploadState.bytesTotal / (1024 * 1024))} MB (${Math.round((uploadState.bytesUploaded / uploadState.bytesTotal) * 100)}%)`);
-      logger.log(`   🔗 Session URL: ${uploadState.uploadSessionUrl.substring(0, 80)}...`);
       logger.log(`   ⏰ Interrupted at: ${uploadState.interruptedAt}`);
 
       // Import Google Drive auth functionality
@@ -1437,6 +1449,11 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       const { uploadSessionUrl, bytesUploaded: startBytes, bytesTotal, studentGroup, date } = uploadState;
+      const destination = loadJSON('config/upload-destination.json');
+      const folderId = await resolveLectureFolder(google.drive({version:'v3',auth:oAuth2Client}), destination, studentGroup);
+      if (!uploadState.folderId || uploadState.folderId !== folderId) {
+        throw new Error('The saved upload targets an old or unknown folder; keep the session for review');
+      }
       const uploadFilename = `${studentGroup} - ${date}.mp4`;
 
       // Initialize progress tracking
@@ -1508,6 +1525,7 @@ async function handleRequest(req: Request): Promise<Response> {
       } else if (statusResponse.status === 200 || statusResponse.status === 201) {
         // Upload already complete!
         const file = await statusResponse.json() as GoogleDriveFile;
+        await checkUploadedLectureVideo(videoPath, studentGroup, file.id, bytesTotal);
         logger.log(`   Status: ${statusResponse.status} - Upload already complete!`);
         logger.log(`   ✅ File ID: ${file.id}`);
         logger.log(`   🗑️  Removing from active-uploads.json`);
@@ -2042,15 +2060,8 @@ async function handleRequest(req: Request): Promise<Response> {
       const uploadDestination = existsSync(uploadDestinationPath)
         ? JSON.parse(readFileSync(uploadDestinationPath, 'utf-8'))
         : undefined;
-      const folderId = uploadDestination?.groupFolders
-        ? uploadDestination.groupFolders[studentGroup]
-        : uploadDestination?.folderId || FOLDERS[studentGroup];
-      if (!FOLDERS[studentGroup] || !folderId) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: `Unknown student group: ${studentGroup}`
-        }), { headers, status: 400 });
-      }
+      const drive = google.drive({version:'v3', auth:oAuth2Client});
+      const folderId = await resolveLectureFolder(drive, uploadDestination, studentGroup);
 
       // Prepare upload - use original filename to preserve suffixes like _01, _02, etc.
       const uploadFilename = filename;
@@ -2058,6 +2069,16 @@ async function handleRequest(req: Request): Promise<Response> {
       // Get file size for progress tracking
       const fileStats = statSync(videoPath);
       const totalBytes = fileStats.size;
+
+      const digest = await localVideoMd5(videoPath);
+      const existingId = await findExistingVideo(drive, folderId, uploadFilename, totalBytes, digest);
+      if (existingId) {
+        await verifyLectureVideo(drive, uploadDestination, studentGroup, existingId, folderId, totalBytes, digest);
+        uploadProgress.set(finalUploadId, {uploadId:finalUploadId,filename,videoPath,bytesUploaded:totalBytes,
+          bytesTotal:totalBytes,percent:100,status:'complete'});
+        emitProgress(finalUploadId);
+        return new Response(JSON.stringify({success:true,fileId:existingId,reused:true}), {headers});
+      }
 
       // Initialize progress
       uploadProgress.set(finalUploadId, {
@@ -2107,6 +2128,7 @@ async function handleRequest(req: Request): Promise<Response> {
       saveInterruptedUpload(videoPath, {
         videoPath,
         uploadSessionUrl: uploadUrl,
+        folderId,
         bytesUploaded: 0,
         bytesTotal: totalBytes,
         studentGroup,

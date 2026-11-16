@@ -78,14 +78,24 @@ bun install
      }
      ```
 
-### Optional upload folders
+### Lecture group folders
 
-Copy `config/upload-destination.json.example` to `config/upload-destination.json`
-and set `groupFolders` to the Drive folder ID for each study group. Uploads go
-to the matching group folder. The optional `folderId` identifies a former shared
-folder: sync includes its files when their names start with the group name and
-` - `. Sync also checks the original study group folders. Without this file,
-uploads use the original study group folders.
+Set `rootFolderId`, `groupFolders` and `groupPermissions` in private
+`config/upload-destination.json`. Each group maps to the existing subfolder ID
+and the verified class permission IDs. Resolve those IDs from live Drive metadata
+and the original class folder. Do not guess a class address.
+
+Uploads and resumed sessions require one exact group folder under the lecture root,
+including a shortcut to the configured folder. Missing, duplicate or changed folders
+stop the upload. The folder must have the verified group permission and no anonymous
+reader. The uploader does not change permissions. An identical existing MP4 is reused;
+a conflicting name or content is preserved. A saved session without a matching target
+folder stays on disk for review.
+
+Sync includes the configured group folders and the original study group folders.
+The optional legacy `folderId` is read only by sync for old root-level videos.
+Uploads never fall back to that root. Use Zoomik for daily video corrections, which
+retain the original Drive file ID and the Tahvel/Kriit links.
 
 ## Project Setup
 
