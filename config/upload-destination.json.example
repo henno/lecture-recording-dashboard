@@ -1,7 +1,11 @@
 {
-  "folderId": "FORMER_SHARED_FOLDER_ID",
+  "rootFolderId": "LECTURE_ROOT_ID",
   "groupFolders": {
-    "TAK24": "TAK24_FOLDER_ID",
-    "TAK25": "TAK25_FOLDER_ID"
+    "TAK24": "TAK24_SUBFOLDER_ID",
+    "TAK25": "TAK25_SUBFOLDER_ID"
+  },
+  "groupPermissions": {
+    "TAK24": ["VERIFIED_TAK24_PERMISSION_ID"],
+    "TAK25": ["VERIFIED_TAK25_PERMISSION_ID"]
   }
 }

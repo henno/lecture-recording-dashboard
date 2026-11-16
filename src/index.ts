@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {resolveLectureFolder,findExistingVideo} from './lecture-folders';
+import {createHash} from 'node:crypto';
 
 import { serve } from 'bun';
 import { readFileSync, existsSync, unlinkSync, statSync, readdirSync, renameSync, appendFileSync } from 'fs';
@@ -273,6 +275,7 @@ const uploadAbortControllers = new Map<string, AbortController>(); // Track Abor
 interface InterruptedUpload {
   videoPath: string;
   uploadSessionUrl: string;
+  folderId?: string;
   bytesUploaded: number;
   bytesTotal: number;
   studentGroup: string;
@@ -293,7 +296,7 @@ function loadInterruptedUploads(): Record<string, InterruptedUpload> {
 // Save interrupted upload state
 function saveInterruptedUpload(videoPath: string, state: InterruptedUpload) {
   const uploads = loadInterruptedUploads();
-  uploads[videoPath] = state;
+  uploads[videoPath] = {...uploads[videoPath], ...state};
   Bun.write('data/active-uploads.json', JSON.stringify(uploads, null, 2));
 }
 
@@ -1409,7 +1412,6 @@ async function handleRequest(req: Request): Promise<Response> {
       logger.log(`▶️  RESUME REQUEST: ${filename}`);
       logger.log(`   📁 Video: ${videoPath}`);
       logger.log(`   📊 Saved state: ${Math.round(uploadState.bytesUploaded / (1024 * 1024))} MB / ${Math.round(uploadState.bytesTotal / (1024 * 1024))} MB (${Math.round((uploadState.bytesUploaded / uploadState.bytesTotal) * 100)}%)`);
-      logger.log(`   🔗 Session URL: ${uploadState.uploadSessionUrl.substring(0, 80)}...`);
       logger.log(`   ⏰ Interrupted at: ${uploadState.interruptedAt}`);
 
       // Import Google Drive auth functionality
@@ -1437,6 +1439,11 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       const { uploadSessionUrl, bytesUploaded: startBytes, bytesTotal, studentGroup, date } = uploadState;
+      const destination = loadJSON('config/upload-destination.json');
+      const folderId = await resolveLectureFolder(google.drive({version:'v3',auth:oAuth2Client}), destination, studentGroup);
+      if (!uploadState.folderId || uploadState.folderId !== folderId) {
+        throw new Error('The saved upload targets an old or unknown folder; keep the session for review');
+      }
       const uploadFilename = `${studentGroup} - ${date}.mp4`;
 
       // Initialize progress tracking
@@ -2042,15 +2049,8 @@ async function handleRequest(req: Request): Promise<Response> {
       const uploadDestination = existsSync(uploadDestinationPath)
         ? JSON.parse(readFileSync(uploadDestinationPath, 'utf-8'))
         : undefined;
-      const folderId = uploadDestination?.groupFolders
-        ? uploadDestination.groupFolders[studentGroup]
-        : uploadDestination?.folderId || FOLDERS[studentGroup];
-      if (!FOLDERS[studentGroup] || !folderId) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: `Unknown student group: ${studentGroup}`
-        }), { headers, status: 400 });
-      }
+      const drive = google.drive({version:'v3', auth:oAuth2Client});
+      const folderId = await resolveLectureFolder(drive, uploadDestination, studentGroup);
 
       // Prepare upload - use original filename to preserve suffixes like _01, _02, etc.
       const uploadFilename = filename;
@@ -2058,6 +2058,13 @@ async function handleRequest(req: Request): Promise<Response> {
       // Get file size for progress tracking
       const fileStats = statSync(videoPath);
       const totalBytes = fileStats.size;
+
+      const hash = createHash('md5');
+      for await (const chunk of createReadStream(videoPath)) hash.update(chunk);
+      const existingId = await findExistingVideo(drive, folderId, uploadFilename, totalBytes, hash.digest('hex'));
+      if (existingId) {
+        return new Response(JSON.stringify({success:true,fileId:existingId,reused:true}), {headers});
+      }
 
       // Initialize progress
       uploadProgress.set(finalUploadId, {
@@ -2107,6 +2114,7 @@ async function handleRequest(req: Request): Promise<Response> {
       saveInterruptedUpload(videoPath, {
         videoPath,
         uploadSessionUrl: uploadUrl,
+        folderId,
         bytesUploaded: 0,
         bytesTotal: totalBytes,
         studentGroup,
